@@ -1,0 +1,20 @@
+# 示例做市策略配置
+
+# 策略名称
+strategy: example_pmm_strategy
+
+# 交易所
+exchange: binance_paper_trade
+
+# 交易对
+trading_pair: BTC-USDT
+
+# 价差设置
+bid_spread: 0.001   # 买单价差 0.1%
+ask_spread: 0.001   # 卖单价差 0.1%
+
+# 订单数量
+order_amount: 0.001  # BTC
+
+# 订单刷新时间
+order_refresh_time: 30  # 秒
