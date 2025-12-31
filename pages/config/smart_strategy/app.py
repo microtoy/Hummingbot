@@ -27,7 +27,7 @@ initialize_st_page(title="Smart Strategy", icon="🎯", show_readme=False)
 # Initialize backend client
 backend_api_client = get_backend_api_client()
 
-
+# 自定义策略目录路径
 def get_custom_strategies_dir() -> Optional[Path]:
     """获取自定义策略目录路径"""
     possible_dirs = [
@@ -35,7 +35,6 @@ def get_custom_strategies_dir() -> Optional[Path]:
         Path("/app/custom_strategies"),
         Path("custom_strategies"),
         Path.cwd() / "custom_strategies",
-        Path.cwd().parent / "custom_strategies",
     ]
     
     for dir_path in possible_dirs:
