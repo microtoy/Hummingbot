@@ -210,19 +210,32 @@ current_config["script_file"] = selected_strat["filename"]
 bt_results = backtesting_section(current_config, backend_api_client)
 
 if bt_results:
-    fig = create_backtesting_figure(
-        df=bt_results["processed_data"],
-        executors=bt_results["executors"],
-        config=current_config
-    )
-    c1, c2 = st.columns([0.9, 0.1])
-    with c1:
-        render_backtesting_metrics(bt_results["results"])
-        st.plotly_chart(fig, use_container_width=True)
-    with c2:
-        render_accuracy_metrics(bt_results["results"])
-        st.write("---")
-        render_close_types(bt_results["results"])
+    if "error" in bt_results:
+        st.error(f"Backtesting Error: {bt_results['error']}")
+        with st.expander("Debug Info (API Response)"):
+            st.json(bt_results)
+    elif "processed_data" not in bt_results:
+        st.error("Backtesting failed: 'processed_data' not found in response.")
+        with st.expander("Debug Info (API Response)"):
+            st.json(bt_results)
+    else:
+        try:
+            fig = create_backtesting_figure(
+                df=bt_results["processed_data"],
+                executors=bt_results["executors"],
+                config=current_config
+            )
+            c1, c2 = st.columns([0.9, 0.1])
+            with c1:
+                render_backtesting_metrics(bt_results["results"])
+                st.plotly_chart(fig, use_container_width=True)
+            with c2:
+                render_accuracy_metrics(bt_results["results"])
+                st.write("---")
+                render_close_types(bt_results["results"])
+        except Exception as e:
+            st.error(f"Error rendering backtesting results: {e}")
+            st.json(bt_results)
 
 # 5. Save/Upload Section
 st.write("---")
