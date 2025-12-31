@@ -206,36 +206,83 @@ current_config["controller_name"] = selected_strat["id"]
 current_config["controller_type"] = "script"
 current_config["script_file"] = selected_strat["filename"]
 
+def safe_backtesting_section(inputs, backend_api_client):
+    """
+    A safe version of the backtesting section that handles API errors gracefully.
+    Built-in component crashes when the API returns an error dictionary.
+    """
+    from datetime import datetime, timedelta
+    st.write("### Backtesting")
+    c1, c2, c3, c4, c5 = st.columns(5)
+    default_end_time = datetime.now().date() - timedelta(days=1)
+    default_start_time = default_end_time - timedelta(days=2)
+    with c1:
+        start_date = st.date_input("Start Date", default_start_time, key="bt_start_date")
+    with c2:
+        end_date = st.date_input("End Date", default_end_time,
+                                 help="End date is inclusive, make sure that you are not including the current date.", key="bt_end_date")
+    with c3:
+        backtesting_resolution = st.selectbox("Backtesting Resolution",
+                                              options=["1m", "3m", "5m", "15m", "30m", "1h", "1s"], index=0, key="bt_resolution")
+    with c4:
+        trade_cost = st.number_input("Trade Cost (%)", min_value=0.0, value=0.06, step=0.01, format="%.2f", key="bt_cost_input")
+    with c5:
+        run_backtesting = st.button("Run Backtesting", key="bt_run_button")
+
+    if run_backtesting:
+        start_datetime = datetime.combine(start_date, datetime.min.time())
+        end_datetime = datetime.combine(end_date, datetime.max.time())
+        with st.spinner("Running backtesting..."):
+            try:
+                results = backend_api_client.backtesting.run_backtesting(
+                    start_time=int(start_datetime.timestamp()),
+                    end_time=int(end_datetime.timestamp()),
+                    backtesting_resolution=backtesting_resolution,
+                    trade_cost=trade_cost / 100,
+                    config=inputs,
+                )
+                if not results:
+                    st.error("No response from the backtesting API.")
+                    return None
+                if "error" in results:
+                    st.error(f"Backend Error: {results['error']}")
+                    with st.expander("Show detailed error response"):
+                        st.json(results)
+                    return None
+                if "processed_data" not in results:
+                    st.error("API Response missing 'processed_data' key.")
+                    st.json(results)
+                    return None
+                if len(results["processed_data"]) == 0:
+                    st.warning("No trades were executed during the selected period.")
+                    return None
+                return results
+            except Exception as e:
+                st.error(f"Failed to connect to backtesting service: {e}")
+                return None
+    return None
+
 # 4. Backtesting Section
-bt_results = backtesting_section(current_config, backend_api_client)
+bt_results = safe_backtesting_section(current_config, backend_api_client)
 
 if bt_results:
-    if "error" in bt_results:
-        st.error(f"Backtesting Error: {bt_results['error']}")
-        with st.expander("Debug Info (API Response)"):
-            st.json(bt_results)
-    elif "processed_data" not in bt_results:
-        st.error("Backtesting failed: 'processed_data' not found in response.")
-        with st.expander("Debug Info (API Response)"):
-            st.json(bt_results)
-    else:
-        try:
-            fig = create_backtesting_figure(
-                df=bt_results["processed_data"],
-                executors=bt_results["executors"],
-                config=current_config
-            )
-            c1, c2 = st.columns([0.9, 0.1])
-            with c1:
-                render_backtesting_metrics(bt_results["results"])
-                st.plotly_chart(fig, use_container_width=True)
-            with c2:
-                render_accuracy_metrics(bt_results["results"])
-                st.write("---")
-                render_close_types(bt_results["results"])
-        except Exception as e:
-            st.error(f"Error rendering backtesting results: {e}")
-            st.json(bt_results)
+    try:
+        fig = create_backtesting_figure(
+            df=bt_results["processed_data"],
+            executors=bt_results["executors"],
+            config=current_config
+        )
+        c1, c2 = st.columns([0.9, 0.1])
+        with c1:
+            render_backtesting_metrics(bt_results["results"])
+            st.plotly_chart(fig, use_container_width=True)
+        with c2:
+            render_accuracy_metrics(bt_results["results"])
+            st.write("---")
+            render_close_types(bt_results["results"])
+    except Exception as e:
+        st.error(f"Error rendering backtesting results: {e}")
+        st.json(bt_results)
 
 # 5. Save/Upload Section
 st.write("---")
