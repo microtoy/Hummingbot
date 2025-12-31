@@ -14,21 +14,23 @@ from hummingbot.strategy_v2.executors.position_executor.data_types import Positi
 class ExamplePMMStrategyConfig(MarketMakingControllerConfigBase):
     """
     Configuration for ExamplePMMStrategy.
-    This is a V2 Controller that supports backtesting and advanced visualization.
+    Uses standard V2 fields for full compatibility with backtesting.
     """
     controller_name: str = "example_pmm_strategy"
-    candles_config: List[CandlesConfig] = Field(default=[])
     
-    # Strategy Parameters
-    bid_spread: Decimal = Field(default=Decimal("0.001"), description="Spread for buy orders")
-    ask_spread: Decimal = Field(default=Decimal("0.001"), description="Spread for sell orders")
-    order_amount: Decimal = Field(default=Decimal("0.01"), description="Amount per order")
+    # Standard V2 Fields with explicit defaults to avoid NoneType errors
+    buy_spreads: List[float] = Field(default=[0.001], description="Spread for buy orders")
+    sell_spreads: List[float] = Field(default=[0.001], description="Spread for sell orders")
+    buy_amounts_pct: List[Decimal] = Field(default=[Decimal("1")], description="Weight for buy orders")
+    sell_amounts_pct: List[Decimal] = Field(default=[Decimal("1")], description="Weight for sell orders")
+    
+    # Custom parameter (can still be added)
     order_refresh_time: int = Field(default=30, description="Time in seconds to refresh orders")
 
 
 class ExamplePMMStrategyController(MarketMakingControllerBase):
     """
-    A simple Pure Market Making controller demonstration.
+    A simple Pure Market Making controller.
     """
     def __init__(self, config: ExamplePMMStrategyConfig, *args, **kwargs):
         super().__init__(config, *args, **kwargs)
@@ -36,8 +38,7 @@ class ExamplePMMStrategyController(MarketMakingControllerBase):
 
     def get_executor_config(self, level_id: str, price: Decimal, amount: Decimal):
         """
-        Logic to create executor configurations. 
-        In PMM, this usually defines a buy or sell executor.
+        Creates position executor config using standard triple barrier settings.
         """
         trade_type = self.get_trade_type_from_level_id(level_id)
         return PositionExecutorConfig(

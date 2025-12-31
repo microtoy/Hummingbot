@@ -61,6 +61,9 @@ def extract_value(node) -> Any:
                 for kw in node.keywords:
                     if kw.arg == "default":
                         return extract_value(kw.value)
+        elif isinstance(node.func, ast.Attribute):
+            # Handle cases like TradeType.BUY if needed, for now just constant/literal
+            pass
     return None
 
 def extract_controller_info(content: str) -> Dict[str, Any]:
@@ -188,6 +191,15 @@ if params:
                 label = p_name.replace("_", " ").title()
                 if isinstance(p_val, bool):
                     config[p_name] = col.checkbox(label, value=bool(cur_val), key=f"ui_{p_name}")
+                elif isinstance(p_val, list):
+                    # Show list as comma-separated string for editing
+                    list_str = ",".join([str(x) for x in cur_val]) if isinstance(cur_val, list) else str(cur_val)
+                    new_list_str = col.text_input(label, value=list_str, key=f"ui_{p_name}", help="Enter comma-separated values")
+                    try:
+                        # Convert back to list of floats/strings
+                        config[p_name] = [float(x.strip()) if x.strip().replace('.','',1).isdigit() else x.strip() for x in new_list_str.split(',') if x.strip()]
+                    except:
+                        config[p_name] = cur_val
                 elif isinstance(p_val, (int, float)):
                     config[p_name] = col.number_input(label, value=float(cur_val), key=f"ui_{p_name}")
                 else:
