@@ -24,7 +24,7 @@ services:
       - "8000:8000"
     volumes:
       - ./bots:/hummingbot-api/bots
-      - ./custom_strategies:/hummingbot-api/scripts
+      - ./custom_strategies:/hummingbot-api/bots/controllers/custom
       - /var/run/docker.sock:/var/run/docker.sock
     env_file:
       - .env

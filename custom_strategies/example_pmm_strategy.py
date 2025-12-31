@@ -1,83 +1,53 @@
-"""
-示例做市策略 - Pure Market Making (PMM)
-在买卖两侧挂单,赚取价差，测试更改
-"""
 from decimal import Decimal
-from hummingbot.strategy.script_strategy_base import ScriptStrategyBase
+from typing import List, Optional
 
-class ExamplePMMStrategy(ScriptStrategyBase):
+from pydantic import Field
+
+from hummingbot.data_feed.candles_feed.data_types import CandlesConfig
+from hummingbot.strategy_v2.controllers.market_making_controller_base import (
+    MarketMakingControllerBase,
+    MarketMakingControllerConfigBase,
+)
+from hummingbot.strategy_v2.executors.position_executor.data_types import PositionExecutorConfig
+
+
+class ExamplePMMStrategyConfig(MarketMakingControllerConfigBase):
     """
-    简单的做市策略
-    功能:
-    - 在中间价上下挂买卖单
-    - 自动调整订单价格
-    - 赚取买卖价差
+    Configuration for ExamplePMMStrategy.
+    This is a V2 Controller that supports backtesting and advanced visualization.
     """
+    controller_name: str = "example_pmm_strategy"
+    candles_config: List[CandlesConfig] = Field(default=[])
     
-    # 配置交易对
-    markets = {
-        "binance_paper_trade": {"BTC-USDT"}
-    }
-    
-    # 策略参数
-    bid_spread = Decimal("0.001")      # 买单价差 0.1%
-    ask_spread = Decimal("0.001")      # 卖单价差 0.1%
-    order_amount = Decimal("0.001")    # 订单数量 (BTC)
-    order_refresh_time = 30            # 订单刷新时间(秒)
-    
-    def __init__(self):
-        super().__init__()
-        self.last_timestamp = 0
-    
-    def on_tick(self):
+    # Strategy Parameters
+    bid_spread: Decimal = Field(default=Decimal("0.001"), description="Spread for buy orders")
+    ask_spread: Decimal = Field(default=Decimal("0.001"), description="Spread for sell orders")
+    order_amount: Decimal = Field(default=Decimal("0.01"), description="Amount per order")
+    order_refresh_time: int = Field(default=30, description="Time in seconds to refresh orders")
+
+
+class ExamplePMMStrategyController(MarketMakingControllerBase):
+    """
+    A simple Pure Market Making controller demonstration.
+    """
+    def __init__(self, config: ExamplePMMStrategyConfig, *args, **kwargs):
+        super().__init__(config, *args, **kwargs)
+        self.config = config
+
+    def get_executor_config(self, level_id: str, price: Decimal, amount: Decimal):
         """
-        每个 tick 执行一次
+        Logic to create executor configurations. 
+        In PMM, this usually defines a buy or sell executor.
         """
-        # 获取当前时间戳
-        current_timestamp = self.current_timestamp
-        
-        # 检查是否需要刷新订单
-        if current_timestamp - self.last_timestamp < self.order_refresh_time:
-            return
-        
-        self.last_timestamp = current_timestamp
-        
-        # 获取当前中间价
-        mid_price = self.connectors["binance_paper_trade"].get_mid_price("BTC-USDT")
-        
-        if mid_price is None:
-            self.logger().warning("无法获取中间价")
-            return
-        
-        # 计算买卖价格
-        bid_price = mid_price * (1 - self.bid_spread)
-        ask_price = mid_price * (1 + self.ask_spread)
-        
-        # 取消所有现有订单
-        self.cancel_all_orders()
-        
-        # 下买单
-        self.buy(
-            connector_name="binance_paper_trade",
-            trading_pair="BTC-USDT",
-            amount=self.order_amount,
-            order_type="limit",
-            price=bid_price
-        )
-        
-        # 下卖单
-        self.sell(
-            connector_name="binance_paper_trade",
-            trading_pair="BTC-USDT",
-            amount=self.order_amount,
-            order_type="limit",
-            price=ask_price
-        )
-        
-        # 打印日志
-        self.logger().info(
-            f"订单已更新 | "
-            f"中间价: {mid_price:.2f} | "
-            f"买单: {bid_price:.2f} | "
-            f"卖单: {ask_price:.2f}"
+        trade_type = self.get_trade_type_from_level_id(level_id)
+        return PositionExecutorConfig(
+            timestamp=self.market_data_provider.time(),
+            level_id=level_id,
+            connector_name=self.config.connector_name,
+            trading_pair=self.config.trading_pair,
+            entry_price=price,
+            amount=amount,
+            triple_barrier_config=self.config.triple_barrier_config,
+            leverage=self.config.leverage,
+            side=trade_type,
         )
