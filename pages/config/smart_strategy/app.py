@@ -141,6 +141,10 @@ def safe_backtesting_section(inputs, backend_api_client):
                 if "error" in results:
                     st.error(f"Backend Error: {results['error']}")
                     return None
+                if "results" in results:
+                    # Normalize results to prevent UI crashes on empty backtests
+                    if isinstance(results["results"].get("close_types"), (int, float)):
+                        results["results"]["close_types"] = {}
                 return results
             except Exception as e:
                 st.error(f"Connection failed: {e}")
