@@ -1,6 +1,6 @@
 """
 示例做市策略 - Pure Market Making (PMM)
-在买卖两侧挂单,赚取价差
+在买卖两侧挂单,赚取价差，测试更改
 """
 from decimal import Decimal
 from hummingbot.strategy.script_strategy_base import ScriptStrategyBase
