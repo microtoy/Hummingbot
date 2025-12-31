@@ -13,6 +13,8 @@ services:
     volumes:
       - ./credentials.yml:/home/dashboard/credentials.yml
       - ./pages:/home/dashboard/frontend/pages
+      - ./custom_strategies:/home/dashboard/custom_strategies
+      - ./custom_configs:/home/dashboard/custom_configs
     networks:
         - emqx-bridge
   hummingbot-api:
