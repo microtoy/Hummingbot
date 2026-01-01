@@ -240,26 +240,36 @@ class BacktestingEngineBase:
 
     async def simulate_execution(self, trade_cost: float) -> list:
         """
-        Simulates market making strategy over historical data, considering trading costs.
+        Simulates market making strategy over historical data using Event-Driven Jump-Ahead.
         """
         processed_features = self.prepare_market_data()
         self.active_executor_simulations: List[ExecutorSimulation] = []
         self.stopped_executors_info: List[ExecutorInfo] = []
         
-        # Pre-calculate connector key to avoid string ops in loop
-        connector_key = f"{self.controller.config.connector_name}_{self.controller.config.trading_pair}"
+        # 1. Pre-identify all Signal Events (where signal is non-zero)
+        # This allows us to skip thousands of 'silent' ticks.
+        signal_events = processed_features[processed_features['signal'] != 0].index.tolist()
+        signal_ptr = 0
+        num_signals = len(signal_events)
         
-        # Optimization: itertuples() is significantly faster than to_dict('records')
-        # We access values by index which is much faster than dictionary access.
-        for row in processed_features.itertuples(index=False):
-            # 1. Update State (Inlined for speed)
-            current_ts = row.timestamp
-            # Use pre-calculated Decimal to squeeze performance
+        # 2. Pre-calculate indices for fast lookups
+        all_timestamps = processed_features.index.tolist()
+        ts_to_idx = {ts: i for i, ts in enumerate(all_timestamps)}
+        
+        connector_key = f"{self.controller.config.connector_name}_{self.controller.config.trading_pair}"
+        last_ts = all_timestamps[-1]
+        current_ts = all_timestamps[0]
+        
+        # Event Loop
+        while current_ts <= last_ts:
+            # --- PROCESS CURRENT TICK ---
+            # Update state for the current jump target
+            row = processed_features.loc[current_ts]
             self.controller.market_data_provider.prices = {connector_key: row.close_bt_decimal}
             self.controller.market_data_provider._time = current_ts
-            self.controller.processed_data.update(row._asdict()) # Still need dict for controller logic for now
+            self.controller.processed_data.update(row.to_dict())
             
-            # 2. Update executors and collect finished ones
+            # Update executors and collect finished ones
             active_executors_info = []
             simulations_to_remove = []
             for executor in self.active_executor_simulations:
@@ -273,23 +283,55 @@ class BacktestingEngineBase:
             if simulations_to_remove:
                 self.active_executor_simulations = [es for es in self.active_executor_simulations if es.config.id not in simulations_to_remove]
             
-            # Update controller info ONLY WITH ACTIVE ones (Crucial speedup)
             self.controller.executors_info = active_executors_info
             
-            # 3. Determine Actions
+            # Determine Actions
             for action in self.controller.determine_executor_actions():
                 if isinstance(action, CreateExecutorAction):
-                    # For optimization, we slice the dataframe only when needed
-                    # Find current index in processed_features to avoid iloc overhead
-                    # Note: This is still a bit slow but only happens on trade creation
-                    current_idx = processed_features.index[processed_features['timestamp'] == current_ts][0]
+                    current_idx = ts_to_idx[current_ts]
                     executor_simulation = self.simulate_executor(action.executor_config, processed_features.iloc[current_idx:], trade_cost)
                     if executor_simulation is not None and executor_simulation.close_type != CloseType.FAILED:
                         self.manage_active_executors(executor_simulation)
                 elif isinstance(action, StopExecutorAction):
                     self.handle_stop_action(action, current_ts)
 
-        # FINAL MERGE: Combine active and stopped only at the very end
+            # --- JUMP AHEAD LOGIC ---
+            # We want to jump to the MINIMUM of:
+            # A) Next Signal Event
+            # B) Next Executor Termination
+            # C) If no events, jump to the very end
+            
+            # A. Find next signal
+            while signal_ptr < num_signals and signal_events[signal_ptr] <= current_ts:
+                signal_ptr += 1
+            next_signal_ts = signal_events[signal_ptr] if signal_ptr < num_signals else last_ts + 1
+            
+            # B. Find next closure
+            next_closure_ts = last_ts + 1
+            for es in self.active_executor_simulations:
+                # executor_simulation.index.max() is the close timestamp
+                es_close_ts = es.executor_simulation.index.max()
+                if es_close_ts > current_ts:
+                    next_closure_ts = min(next_closure_ts, es_close_ts)
+            
+            # The next significant moment
+            next_ts = min(next_signal_ts, next_closure_ts)
+            
+            # If we are at the end or no more events, move out of loop
+            if next_ts > last_ts or next_ts == current_ts:
+                # If next_ts is same as current (tiny resolution issues), move by 1 tick to avoid infinite loop
+                if next_ts == current_ts:
+                    idx = ts_to_idx[current_ts]
+                    if idx + 1 < len(all_timestamps):
+                        current_ts = all_timestamps[idx + 1]
+                    else:
+                        break
+                else:
+                    break
+            else:
+                current_ts = next_ts
+
+        # FINAL MERGE
         return self.controller.executors_info + self.stopped_executors_info
 
     async def update_state(self, row):
@@ -323,38 +365,50 @@ class BacktestingEngineBase:
 
     def prepare_market_data(self) -> pd.DataFrame:
         """
-        Prepares market data by merging candle data with strategy features, filling missing values.
-
-        Returns:
-            pd.DataFrame: The prepared market data with necessary features.
+        Prepares market data by merging candle data with strategy features.
+        Optimized for idempotency and speed.
         """
+        # If already prepared and contains our simulation columns, skip
+        if "close_bt_decimal" in self.controller.processed_data.get("features", pd.DataFrame()).columns:
+            return self.controller.processed_data["features"]
+
         backtesting_candles = self.controller.market_data_provider.get_candles_df(
             connector_name=self.controller.config.connector_name,
             trading_pair=self.controller.config.trading_pair,
             interval=self.backtesting_resolution
         ).add_suffix("_bt")
 
-        if "features" not in self.controller.processed_data:
+        if "features" not in self.controller.processed_data or self.controller.processed_data["features"].empty:
             backtesting_candles["reference_price"] = backtesting_candles["close_bt"]
             backtesting_candles["spread_multiplier"] = 1
             backtesting_candles["signal"] = 0
         else:
-            backtesting_candles = pd.merge_asof(backtesting_candles, self.controller.processed_data["features"],
+            features_df = self.controller.processed_data["features"].copy()
+            # Remove potentially conflicting columns from features if they came from a previous join
+            cols_to_drop = [c for c in features_df.columns if c.endswith("_bt") and c != "timestamp_bt"]
+            if cols_to_drop:
+                features_df.drop(columns=cols_to_drop, inplace=True)
+
+            if features_df.index.name == "timestamp":
+                features_df.index.name = None
+            
+            backtesting_candles = pd.merge_asof(backtesting_candles, features_df,
                                                 left_on="timestamp_bt", right_on="timestamp",
                                                 direction="backward")
 
-        backtesting_candles["timestamp"] = backtesting_candles["timestamp_bt"]
-        # Set timestamp as index to allow index slicing for performance
+        # Standardize columns
+        if "timestamp_bt" in backtesting_candles.columns:
+            backtesting_candles["timestamp"] = backtesting_candles["timestamp_bt"]
+        
         backtesting_candles = BacktestingDataProvider.ensure_epoch_index(backtesting_candles)
-        backtesting_candles["open"] = backtesting_candles["open_bt"]
-        backtesting_candles["high"] = backtesting_candles["high_bt"]
-        backtesting_candles["low"] = backtesting_candles["low_bt"]
-        backtesting_candles["close"] = backtesting_candles["close_bt"]
-        backtesting_candles["volume"] = backtesting_candles["volume_bt"]
+        backtesting_candles.index.name = "timestamp"
         
-        # Pre-convert close to Decimal for high-speed simulation loop
-        backtesting_candles["close_bt_decimal"] = backtesting_candles["close_bt"].apply(Decimal)
+        for base_col in ["open", "high", "low", "close", "volume"]:
+            bt_col = f"{base_col}_bt"
+            if bt_col in backtesting_candles.columns:
+                backtesting_candles[base_col] = backtesting_candles[bt_col]
         
+        backtesting_candles["close_bt_decimal"] = backtesting_candles["close"].apply(Decimal)
         backtesting_candles.dropna(inplace=True)
         self.controller.processed_data["features"] = backtesting_candles
         return backtesting_candles
