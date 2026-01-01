@@ -66,6 +66,7 @@ async def sync_candles(backtesting_config: BacktestingConfig):
         backtesting_engine.backtesting_data_provider.update_backtesting_time(
             int(backtesting_config.start_time), int(backtesting_config.end_time))
         backtesting_engine.controller = SimpleNamespace(config=controller_config)
+        backtesting_engine.backtesting_resolution = backtesting_config.backtesting_resolution
         
         # This will trigger the smart cache logic
         await backtesting_engine.initialize_backtesting_data_provider()
