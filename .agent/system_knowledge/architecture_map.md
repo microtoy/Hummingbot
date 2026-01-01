@@ -25,10 +25,11 @@ We established a mechanism where files in the `custom_strategies/` directory are
 - **Backtesting Engine**: The API loads the controller via `bots.controllers.custom.<filename>`.
 
 ### 4. Known Data Normalization Fixes
-- **NoneType Summation Error**: If `buy_amounts_pct` or `sell_amounts_pct` are `None`, the backend `sum()` will fail.
-  - *Fix*: Always initialize these lists in the `Config` class with defaults like `[Decimal("1")]`.
-- **Empty Backtest Error**: If 0 trades occur, `close_types` returns an `int` 0.
-  - *Fix*: The Dashboard app normalizes this to `{}` before rendering metrics.
+- **Backtesting Engine JSON Crash**: When Sharpe ratio is `inf` (std=0), `json.dumps` fails with `ValueError: Out of range float values...`.
+  - *Fix*: Patched `hummingbot/strategy_v2/backtesting/backtesting_engine_base.py` at line 286 to check `returns.std() != 0`.
+  - *Persistence*: The patched file is stored in `scripts/patches/` and mounted back into the container via `docker-compose.yml`.
+- **Pandas SettingWithCopyWarning**: Modifying candle slices in `update_processed_data` caused warnings and log noise.
+  - *Fix*: Use `.copy()` on dataframes returned by `market_data_provider`.
 
 ## Performance Note
 For MA Cross and Directional strategies, ensure `update_processed_data` calculates a full time-series `signal` column in the `features` dataframe for the backtesting engine to process history.
