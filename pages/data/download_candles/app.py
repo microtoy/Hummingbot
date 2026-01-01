@@ -135,21 +135,25 @@ if sync_top10:
                 total_end = int(end_datetime.timestamp())
                 total_duration = total_end - total_start
                 
-                # Chunk size: 7 days (in seconds) for smoother progress
-                CHUNK_SIZE = 7 * 24 * 3600
+                # Chunk size: 2 days (in seconds) for extremely smooth progress
+                CHUNK_SIZE = 2 * 24 * 3600
                 
                 current_start = total_start
-                chunks_processed = 0
-                
                 api_endpoint = f"{api_url}/backtesting/candles/sync"
                 last_rows = 0
                 
                 while current_start < total_end:
                     current_end = min(current_start + CHUNK_SIZE, total_end)
                     
-                    # Update status with percentage
+                    # Calculate progress percentage
                     progress_pct = min(100, int((current_start - total_start) / total_duration * 100))
-                    coin_status[pair]["status"] = f"📥 Downloading {progress_pct}%"
+                    
+                    # Format date range for better visual feedback
+                    d1 = datetime.fromtimestamp(current_start).strftime('%m/%d')
+                    d2 = datetime.fromtimestamp(current_end).strftime('%m/%d')
+                    
+                    # Update UI to show exactly what period we are fetching
+                    coin_status[pair]["status"] = f"📥 {d1}→{d2} ({progress_pct}%)"
                     update_display()
                     
                     payload = {
@@ -169,14 +173,15 @@ if sync_top10:
                         if response.status == 200:
                             result = await response.json()
                             if result.get("status") == "success":
-                                # Accumulate rows (just taking the last report for now as it reads the growing file)
+                                # The backend returns the TOTAL row count in the file
+                                # Updating this in real-time shows the file "growing"
                                 last_rows = result.get("rows", 0)
-                                coin_status[pair]["rows"] = f"{last_rows:,}"
+                                coin_status[pair]["rows"] = f"{last_rows:,} 📈"
                             else:
                                 short_err = str(result.get('error', 'Error'))[:30]
                                 coin_status[pair]["status"] = f"❌ Error: {short_err}"
                                 update_display()
-                                return  # Stop processing chunks for this coin
+                                return
                         else:
                             coin_status[pair]["status"] = f"❌ HTTP {response.status}"
                             update_display()
@@ -184,7 +189,6 @@ if sync_top10:
                     
                     # Move to next chunk
                     current_start = current_end
-                    chunks_processed += 1
                 
                 # Done
                 coin_status[pair]["status"] = "✅ Done"
