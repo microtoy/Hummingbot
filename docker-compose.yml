@@ -29,6 +29,7 @@ services:
       - ./custom_strategies:/hummingbot-api/bots/controllers/custom
       - ./.agent/system/patches/backtesting_engine_base.py:/opt/conda/envs/hummingbot-api/lib/python3.12/site-packages/hummingbot/strategy_v2/backtesting/backtesting_engine_base.py
       - ./.agent/system/patches/backtesting_router.py:/hummingbot-api/routers/backtesting.py
+      - ./.agent/system/patches/candle_guardian.py:/hummingbot-api/routers/candle_guardian.py
       - /var/run/docker.sock:/var/run/docker.sock
     env_file:
       - .env

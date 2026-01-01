@@ -34,8 +34,6 @@ from hummingbot.strategy_v2.models.executors_info import ExecutorInfo
 class BacktestingEngineBase:
     __controller_class_cache = LazyDict[str, Type[ControllerBase]]()
 
-    __controller_class_cache = LazyDict[str, Type[ControllerBase]]()
-
     def __init__(self):
         self.controller = None
         self.backtesting_resolution = None
@@ -44,7 +42,52 @@ class BacktestingEngineBase:
         self.dca_executor_simulator = DCAExecutorSimulator()
         self.allow_download = False  # Default: Cache-Only Mode
 
-    # ... [Skipped methods remain unchanged] ...
+    @classmethod
+    def get_controller_config_instance_from_dict(cls, config_data: Dict, controllers_module: str = None) -> ControllerConfigBase:
+        controller_name = config_data.get("controller_name")
+        
+        # Define potential module paths to search (priority to custom, then bot default, then hummingbot core)
+        potential_modules = []
+        if controllers_module:
+            potential_modules.append(f"{controllers_module}.custom.{controller_name}")
+            potential_modules.append(f"{controllers_module}.{controller_name}")
+        potential_modules.append(f"hummingbot.strategy_v2.controllers.{controller_name}")
+
+        module = None
+        tried_paths = []
+        for module_path in potential_modules:
+            try:
+                module = importlib.import_module(module_path)
+                print(f"✅ Loaded controller from: {module_path}")
+                break
+            except ImportError:
+                tried_paths.append(module_path)
+                continue
+
+        if not module:
+            raise InvalidController(f"Controller {controller_name} not found. Tried: {', '.join(tried_paths)}")
+
+        config_class = None
+        for name, obj in inspect.getmembers(module):
+            if inspect.isclass(obj) and issubclass(obj, ControllerConfigBase) and obj is not ControllerConfigBase:
+                if issubclass(obj, (DirectionalTradingControllerConfigBase, MarketMakingControllerConfigBase)):
+                    config_class = obj
+                    break
+                config_class = obj
+
+        if not config_class:
+            raise InvalidController(f"No configuration class found in module for {controller_name}")
+
+        return config_class(**config_data)
+
+    @classmethod
+    def get_controller_config_instance_from_yml(cls, config_path: str, controllers_conf_dir_path: str, controllers_module: str) -> ControllerConfigBase:
+        path = Path(controllers_conf_dir_path) / config_path
+        if not path.exists():
+            raise FileNotFoundError(f"Config file not found at {path}")
+        with open(path, 'r') as f:
+            config_data = yaml.safe_load(f)
+        return cls.get_controller_config_instance_from_dict(config_data=config_data, controllers_module=controllers_module)
 
     async def initialize_backtesting_data_provider(self):
         # Main candle feed
