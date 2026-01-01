@@ -42,8 +42,16 @@ async def get_candles_status():
 async def sync_candles(backtesting_config: BacktestingConfig):
     """Prefetch and cache candles without running a full backtest."""
     try:
+        from types import SimpleNamespace
         # We only need the connector and range info
-        if isinstance(backtesting_config.config, str):
+        if isinstance(backtesting_config.config, dict) and "connector_name" in backtesting_config.config:
+            # Bypass full validation for sync
+            controller_config = SimpleNamespace(
+                connector_name=backtesting_config.config["connector_name"],
+                trading_pair=backtesting_config.config["trading_pair"],
+                candles_config=backtesting_config.config.get("candles_config", [])
+            )
+        elif isinstance(backtesting_config.config, str):
             controller_config = backtesting_engine.get_controller_config_instance_from_yml(
                 config_path=backtesting_config.config,
                 controllers_conf_dir_path=settings.app.controllers_path,
@@ -57,7 +65,7 @@ async def sync_candles(backtesting_config: BacktestingConfig):
             
         backtesting_engine.backtesting_data_provider.update_backtesting_time(
             int(backtesting_config.start_time), int(backtesting_config.end_time))
-        backtesting_engine.controller = type('obj', (object,), {'config': controller_config})()
+        backtesting_engine.controller = SimpleNamespace(config=controller_config)
         
         # This will trigger the smart cache logic
         await backtesting_engine.initialize_backtesting_data_provider()
