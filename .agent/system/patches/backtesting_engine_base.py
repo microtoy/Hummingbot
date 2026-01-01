@@ -84,22 +84,44 @@ class BacktestingEngineBase:
                               start: int, end: int,
                               backtesting_resolution: str = "1m",
                               trade_cost=0.0006):
+        import time
+        performance_report = {}
+        
+        start_time_total = time.perf_counter()
+        
         controller_class = self.__controller_class_cache.get_or_add(controller_config.controller_name, controller_config.get_controller_class)
-        # controller_class = controller_config.get_controller_class()
-        # Load historical candles
+        
+        # Phase 1: Data Initialization
+        start_init = time.perf_counter()
         self.backtesting_data_provider.update_backtesting_time(start, end)
         await self.backtesting_data_provider.initialize_trading_rules(controller_config.connector_name)
         self.controller = controller_class(config=controller_config, market_data_provider=self.backtesting_data_provider,
                                            actions_queue=None)
         self.backtesting_resolution = backtesting_resolution
         await self.initialize_backtesting_data_provider()
+        performance_report["data_initialization"] = time.perf_counter() - start_init
+        
+        # Phase 2: Processed Data (Strategy Logic)
+        start_processed = time.perf_counter()
         await self.controller.update_processed_data()
+        performance_report["processed_data_calc"] = time.perf_counter() - start_processed
+        
+        # Phase 3: Execution Simulation
+        start_sim = time.perf_counter()
         executors_info = await self.simulate_execution(trade_cost=trade_cost)
+        performance_report["execution_simulation"] = time.perf_counter() - start_sim
+        
+        # Phase 4: Summarize
         results = self.summarize_results(executors_info, controller_config.total_amount_quote)
+        
+        performance_report["total_time"] = time.perf_counter() - start_time_total
+        performance_report["kline_count"] = len(self.controller.processed_data.get("features", []))
+        
         return {
             "executors": executors_info,
             "results": results,
             "processed_data": self.controller.processed_data,
+            "performance": performance_report
         }
 
     async def initialize_backtesting_data_provider(self):

@@ -217,7 +217,7 @@ if params:
 bt_results = safe_backtesting_section(config, backend_api_client)
 if bt_results:
     fig = create_backtesting_figure(df=bt_results["processed_data"], executors=bt_results["executors"], config=config)
-    c1, c2 = st.columns([0.9, 0.1])
+    c1, c2 = st.columns([0.85, 0.15])
     with c1:
         render_backtesting_metrics(bt_results["results"])
         st.plotly_chart(fig, use_container_width=True)
@@ -225,6 +225,26 @@ if bt_results:
         render_accuracy_metrics(bt_results["results"])
         st.write("---")
         render_close_types(bt_results["results"])
+        
+    # Performance Report
+    if "performance" in bt_results:
+        perf = bt_results["performance"]
+        st.write("---")
+        st.subheader("⚡️ Performance Profiling")
+        p1, p2, p3, p4 = st.columns(4)
+        total_time = perf.get("total_time", 0.001)
+        p1.metric("Total Time", f"{total_time:.2f}s")
+        p2.metric("K-Lines", f"{perf.get('kline_count', 0):,}")
+        p3.metric("Throughput", f"{perf.get('kline_count', 0) / total_time:.0f} lines/s")
+        p4.metric("Avg Tick", f"{(total_time * 1000) / max(1, perf.get('kline_count', 1)):.3f} ms")
+        
+        with st.expander("Timeline Breakdown", expanded=False):
+            # Show a simple ASCII bar or metrics
+            for stage, duration in perf.items():
+                if stage in ["total_time", "kline_count"]: continue
+                pct = (duration / total_time) * 100
+                st.write(f"**{stage.replace('_', ' ').title()}**: {duration:.3f}s ({pct:.1f}%)")
+                st.progress(min(1.0, duration / total_time))
 
 # Save
 st.write("---")
