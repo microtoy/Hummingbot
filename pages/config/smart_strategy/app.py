@@ -178,8 +178,7 @@ def safe_backtesting_section(inputs, backend_api_client):
             st.divider()
             st.subheader("🏆 Market Leaderboard")
             
-            sort_col = st.selectbox("Sort by", ["net_pnl", "sharpe_ratio", "accuracy", "profit_factor"], index=0, key="bt_sort")
-            df_sorted = df.sort_values(sort_col, ascending=False)
+            df_sorted = df.sort_values("net_pnl", ascending=False)
             
             st.dataframe(
                 df_sorted.style.format({
