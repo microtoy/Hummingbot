@@ -132,30 +132,63 @@ async def run_backtesting(backtesting_config: BacktestingConfig):
 @router.post("/batch-run")
 async def batch_run_backtesting(batch_configs: list[BacktestingConfig]):
     """
-    Run multiple backtesting simulations in TRUE PARALLEL using asyncio.gather.
-    This maximizes Mac Studio performance by running all backtests concurrently.
+    Two-phase batch backtesting for maximum performance:
+    Phase 1: Parallel cache warming (all coins download data concurrently)
+    Phase 2: Sequential execution (each backtest is ~3ms after cache hit)
     """
     import asyncio
+    from types import SimpleNamespace
+    from hummingbot.data_feed.candles_feed.data_types import CandlesConfig as HBCandlesConfig
     
-    async def run_single_backtest(config: BacktestingConfig):
-        """Run a single backtest and return simplified results."""
+    # Phase 1: Pre-warm cache for ALL trading pairs in parallel
+    async def warm_cache(config: BacktestingConfig):
+        """Download and cache data for a single trading pair."""
         try:
-            # Create a fresh engine for each concurrent task to avoid state conflicts
             engine = BacktestingEngineBase()
+            if isinstance(config.config, dict):
+                trading_pair = config.config.get("trading_pair", "BTC-USDT")
+                connector = config.config.get("connector_name", "binance")
+            else:
+                return  # Skip non-dict configs for warming
             
+            # Set up minimal engine state for cache warming
+            engine.backtesting_data_provider.update_backtesting_time(
+                int(config.start_time), int(config.end_time))
+            engine.backtesting_resolution = config.backtesting_resolution
+            
+            # Minimal controller config just for data loading
+            engine.controller = SimpleNamespace(config=SimpleNamespace(
+                connector_name=connector,
+                trading_pair=trading_pair,
+                candles_config=[]
+            ))
+            
+            await engine.initialize_backtesting_data_provider()
+            return f"✅ {trading_pair}"
+        except Exception as e:
+            return f"❌ {config.config.get('trading_pair', 'Unknown')}: {e}"
+    
+    # Launch ALL cache warming tasks concurrently
+    cache_tasks = [warm_cache(config) for config in batch_configs]
+    await asyncio.gather(*cache_tasks)
+    
+    # Phase 2: Sequential execution (now all data is cached, each takes ~3ms)
+    results = []
+    for config in batch_configs:
+        try:
             if isinstance(config.config, str):
-                controller_config = engine.get_controller_config_instance_from_yml(
+                controller_config = backtesting_engine.get_controller_config_instance_from_yml(
                     config_path=config.config,
                     controllers_conf_dir_path=settings.app.controllers_path,
                     controllers_module=settings.app.controllers_module
                 )
             else:
-                controller_config = engine.get_controller_config_instance_from_dict(
+                controller_config = backtesting_engine.get_controller_config_instance_from_dict(
                     config_data=config.config,
                     controllers_module=settings.app.controllers_module
                 )
             
-            bt_result = await engine.run_backtesting(
+            bt_result = await backtesting_engine.run_backtesting(
                 controller_config=controller_config,
                 trade_cost=config.trade_cost,
                 start=int(config.start_time),
@@ -164,7 +197,7 @@ async def batch_run_backtesting(batch_configs: list[BacktestingConfig]):
             )
             
             summary = bt_result["results"]
-            return {
+            results.append({
                 "trading_pair": controller_config.trading_pair,
                 "net_pnl": summary.get("net_pnl", 0),
                 "net_pnl_quote": summary.get("net_pnl_quote", 0),
@@ -174,17 +207,13 @@ async def batch_run_backtesting(batch_configs: list[BacktestingConfig]):
                 "profit_factor": summary.get("profit_factor", 0),
                 "total_positions": summary.get("total_positions", 0),
                 "performance": bt_result.get("performance", {})
-            }
+            })
         except Exception as e:
-            return {
+            results.append({
                 "trading_pair": config.config.get("trading_pair", "Unknown") if isinstance(config.config, dict) else "Unknown",
                 "error": str(e),
                 "net_pnl": 0, "net_pnl_quote": 0, "accuracy": 0, "sharpe_ratio": 0,
                 "max_drawdown_pct": 0, "profit_factor": 0, "total_positions": 0
-            }
+            })
     
-    # Launch ALL backtests concurrently - true parallelism!
-    tasks = [run_single_backtest(config) for config in batch_configs]
-    results = await asyncio.gather(*tasks)
-    
-    return {"results": list(results)}
+    return {"results": results}
