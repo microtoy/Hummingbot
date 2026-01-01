@@ -15,6 +15,7 @@ services:
       - ./pages:/home/dashboard/frontend/pages
       - ./custom_strategies:/home/dashboard/custom_strategies
       - ./custom_configs:/home/dashboard/custom_configs
+      - ./.agent/system/patches/api_client.py:/opt/conda/envs/dashboard/lib/python3.12/site-packages/hummingbot_api_client/client.py
     networks:
       - emqx-bridge
   hummingbot-api:
