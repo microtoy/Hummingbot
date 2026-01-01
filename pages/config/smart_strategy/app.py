@@ -127,10 +127,10 @@ def safe_backtesting_section(inputs, backend_api_client):
     bt_mode = st.radio("Mode", ["Single Coin", "🚀 Batch Comparison"], horizontal=True, key="bt_mode")
     
     c1, c2, c3, c4 = st.columns(4)
-    default_end_time = datetime.now().date() - timedelta(days=1)
-    default_start_time = default_end_time - timedelta(days=7)
-    with c1: start_date = st.date_input("Start Date", default_start_time, key="bt_sd")
-    with c2: end_date = st.date_input("End Date", default_end_time, key="bt_ed")
+    yesterday = datetime.now().date() - timedelta(days=1)
+    default_start_time = yesterday - timedelta(days=7)
+    with c1: start_date = st.date_input("Start Date", default_start_time, max_value=yesterday, key="bt_sd")
+    with c2: end_date = st.date_input("End Date", yesterday, max_value=yesterday, key="bt_ed")
     with c3: resolution = st.selectbox("Resolution", ["1m", "3m", "5m", "15m", "1h"], index=0, key="bt_res")
     with c4: cost = st.number_input("Cost (%)", min_value=0.0, value=0.06, step=0.01, key="bt_cost")
     
