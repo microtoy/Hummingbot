@@ -104,11 +104,18 @@ if sync_top10:
     
     update_display()
     
-    # Capture current selections to ensure they are available in the async loop
+    # Capture current selections
     selected_connector = connector
     selected_interval = interval
     
-    # Run syncs in parallel with asyncio + independent session (for real-time UI updates)
+    # 1. Fetch CURRENT cache status to assess gaps
+    try:
+        current_cache = backend_api_client.backtesting.get_candles_status()
+        cached_files = {f["file"]: f for f in current_cache.get("cached_files", [])}
+    except Exception:
+        cached_files = {}
+
+    # Run syncs in parallel
     import asyncio
     import aiohttp
     
@@ -125,69 +132,91 @@ if sync_top10:
         pass
 
     async def sync_single_coin(session: aiohttp.ClientSession, pair: str, sem: asyncio.Semaphore, c_val: str, i_val: str):
-        """Sync a single coin async with live status updates using Chunked Requests."""
+        """Sync a single coin with smart gap detection."""
         try:
-            # Wait for slot
-            async with sem:
-                coin_status[pair]["status"] = "🚀 Starting..."
+            target_start = int(start_datetime.timestamp())
+            target_end = int(end_datetime.timestamp())
+            
+            # Check if we have this file in cache
+            filename = f"{c_val}_{pair}_{i_val}.csv"
+            file_cache = cached_files.get(filename)
+            
+            # Identify Gaps
+            gaps = []
+            if not file_cache:
+                # No cache at all: full range is a gap
+                gaps.append((target_start, target_end))
+            else:
+                c_start = int(file_cache["start"])
+                c_end = int(file_cache["end"])
+                
+                # Check for prefix gap (User wants data before what we have)
+                if target_start < c_start - 3600: # 1h tolerance
+                    gaps.append((target_start, c_start))
+                
+                # Check for suffix gap (User wants data after what we have)
+                # Note: target_end is often 'now', while cache might be slightly behind
+                effective_now = int(datetime.now().timestamp()) - 120
+                real_target_end = min(target_end, effective_now)
+                
+                if real_target_end > c_end + 300: # 5m tolerance
+                    gaps.append((c_end, real_target_end))
+            
+            if not gaps:
+                coin_status[pair]["status"] = "✅ Cached"
+                if file_cache:
+                    coin_status[pair]["rows"] = f"{file_cache['count']:,}"
                 update_display()
+                return
+
+            # Process Gaps
+            async with sem:
+                total_duration = sum(g_end - g_start for g_start, g_end in gaps)
+                duration_synced = 0
+                last_rows = file_cache["count"] if file_cache else 0
                 
-                total_start = int(start_datetime.timestamp())
-                total_end = int(end_datetime.timestamp())
-                total_duration = total_end - total_start
-                
-                # Chunk size: 5 days (in seconds) - Balanced for speed and granularity
-                CHUNK_SIZE = 5 * 24 * 3600
-                
-                current_start = total_start
-                api_endpoint = f"{api_url}/backtesting/candles/sync"
-                last_rows = 0
-                
-                while current_start < total_end:
-                    current_end = min(current_start + CHUNK_SIZE, total_end)
+                # Each coin might have 1 or 2 gaps (prefix and/or suffix)
+                for g_start, g_end in gaps:
+                    CHUNK_SIZE = 5 * 24 * 3600 # 5 days
+                    curr = g_start
                     
-                    # Calculate progress percentage
-                    progress_pct = min(100, int((current_start - total_start) / total_duration * 100))
-                    
-                    # Format date range for better visual feedback
-                    d1 = datetime.fromtimestamp(current_start).strftime('%m/%d')
-                    d2 = datetime.fromtimestamp(current_end).strftime('%m/%d')
-                    
-                    # Update UI to show exactly what period we are fetching
-                    coin_status[pair]["status"] = f"📥 {d1}→{d2} ({progress_pct}%)"
-                    update_display()
-                    
-                    payload = {
-                        "start_time": current_start,
-                        "end_time": current_end,
-                        "backtesting_resolution": i_val,
-                        "trade_cost": 0.0006,
-                        "config": {
-                            "controller_name": "Generic",
-                            "connector_name": c_val,
-                            "trading_pair": pair,
-                            "candles_config": []
+                    while curr < g_end:
+                        chunk_end = min(curr + CHUNK_SIZE, g_end)
+                        
+                        # Real-time UI progress based on total gap duration
+                        pct = int((duration_synced + (curr - g_start)) / total_duration * 100)
+                        d1 = datetime.fromtimestamp(curr).strftime('%m/%d')
+                        d2 = datetime.fromtimestamp(chunk_end).strftime('%m/%d')
+                        coin_status[pair]["status"] = f"📥 {d1}→{d2} ({pct}%)"
+                        update_display()
+                        
+                        payload = {
+                            "start_time": curr, "end_time": chunk_end,
+                            "backtesting_resolution": i_val, "trade_cost": 0.0006,
+                            "config": {
+                                "controller_name": "Generic", "connector_name": c_val,
+                                "trading_pair": pair, "candles_config": []
+                            }
                         }
-                    }
-                    
-                    async with session.post(api_endpoint, json=payload, timeout=600) as response:
-                        if response.status == 200:
-                            result = await response.json()
-                            if result.get("status") == "success":
-                                last_rows = result.get("rows", 0)
-                                coin_status[pair]["rows"] = f"{last_rows:,} 📈"
+                        
+                        async with session.post(f"{api_url}/backtesting/candles/sync", json=payload, timeout=600) as resp:
+                            if resp.status == 200:
+                                res = await resp.json()
+                                if res.get("status") == "success":
+                                    last_rows = res.get("rows", last_rows)
+                                    coin_status[pair]["rows"] = f"{last_rows:,} 📈"
+                                else:
+                                    coin_status[pair]["status"] = f"❌ {str(res.get('error'))[:20]}"
+                                    update_display()
+                                    return
                             else:
-                                short_err = str(result.get('error', 'Error'))[:30]
-                                coin_status[pair]["status"] = f"❌ Error: {short_err}"
+                                coin_status[pair]["status"] = f"❌ HTTP {resp.status}"
                                 update_display()
                                 return
-                        else:
-                            coin_status[pair]["status"] = f"❌ HTTP {response.status}"
-                            update_display()
-                            return
-                    
-                    current_start = current_end
-                
+                        
+                        curr = chunk_end
+                    duration_synced += (g_end - g_start)
+
                 coin_status[pair]["status"] = "✅ Done"
                 coin_status[pair]["rows"] = f"{last_rows:,}"
                 progress_tracker[0] += 1
@@ -199,9 +228,8 @@ if sync_top10:
             update_display()
 
     async def run_parallel_sync():
-        sem = asyncio.Semaphore(3) # Create inside loop
-        timeout = aiohttp.ClientTimeout(total=600)
-        async with aiohttp.ClientSession(auth=api_auth, timeout=timeout) as session:
+        sem = asyncio.Semaphore(3)
+        async with aiohttp.ClientSession(auth=api_auth, timeout=aiohttp.ClientTimeout(total=900)) as session:
             tasks = [sync_single_coin(session, pair, sem, selected_connector, selected_interval) for pair in TOP_10_PAIRS]
             await asyncio.gather(*tasks)
 
@@ -210,8 +238,8 @@ if sync_top10:
     
     # Final summary
     success_count = sum(1 for info in coin_status.values() if "✅" in info["status"])
-    progress_bar.progress(1.0, text=f"✅ Complete! {success_count}/{total} succeeded")
-    st.success(f"🎉 Top 10 同步完成！成功: {success_count}/{total}")
+    progress_bar.progress(1.0, text=f"✅ Sync Finished! {success_count}/{total} ready.")
+    st.success(f"🎉 全部增量同步完成！成功: {success_count}/{total}")
 
 
 
