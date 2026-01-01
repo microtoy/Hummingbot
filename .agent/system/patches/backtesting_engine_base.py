@@ -88,7 +88,8 @@ class BacktestingEngineBase:
                     header = f.readline()
                     first_line = f.readline()
                     if first_line:
-                        min_ts = int(first_line.split(b',')[0])
+                        # Use float first to handle cases like "1528716600.0"
+                        min_ts = int(float(first_line.split(b',')[0]))
                     
                     # Read last few bytes for max_ts (much faster than pandas)
                     f.seek(0, 2)
@@ -99,18 +100,15 @@ class BacktestingEngineBase:
                         # Use last non-empty line
                         for line in reversed(last_lines):
                             if line.strip():
-                                max_ts = int(line.split(b',')[0])
+                                max_ts = int(float(line.split(b',')[0]))
                                 break
             except Exception as e:
                 print(f"⚠️ [META ERROR] {e}")
 
         # 1. PERFECT HIT CHECK
         if min_ts is not None and max_ts is not None:
-            if min_ts <= needed_start and max_ts >= effective_needed_end - 86400:
+            if min_ts <= needed_start and max_ts >= effective_needed_end - 86400: # 24h tolerance
                 print(f"✅ [CACHE HIT] {filename} covers {min_ts} to {max_ts}")
-                # We still need the actual data for the data provider, but we restrict the read range
-                # However, for simple hit we can just return.
-                # If we need the data in the provider:
                 full_df = pd.read_csv(cache_file)
                 result_df = full_df[(full_df["timestamp"] >= needed_start) & (full_df["timestamp"] <= needed_end)].copy()
                 key = self.backtesting_data_provider._generate_candle_feed_key(config)
@@ -123,28 +121,33 @@ class BacktestingEngineBase:
 
         # 2. OPTIMIZED SYNC (Only if allow_download=True)
         # CASE A: PURE APPEND (Fast path for Suffix)
-        if max_ts is not None and min_ts is not None and min_ts <= needed_start + 3600:
+        if max_ts is not None and min_ts is not None and min_ts <= needed_start + 86400:
              if max_ts < effective_needed_end - 300:
                 print(f"📥 [APPEND MODE] Fetching suffix for {config.trading_pair}: {max_ts} -> {effective_needed_end}")
-                candle_feed = hummingbot.data_feed.candles_feed.candles_factory.CandlesFactory.get_candle(config)
-                suffix_df = await candle_feed.get_historical_candles(config=HistoricalCandlesConfig(
-                    connector_name=config.connector, trading_pair=config.trading_pair,
-                    interval=config.interval, start_time=max_ts + 1, end_time=effective_needed_end
-                ))
+                try:
+                    candle_feed = hummingbot.data_feed.candles_feed.candles_factory.CandlesFactory.get_candle(config)
+                    suffix_df = await candle_feed.get_historical_candles(config=HistoricalCandlesConfig(
+                        connector_name=config.connector, trading_pair=config.trading_pair,
+                        interval=config.interval, start_time=max_ts + 1, end_time=effective_needed_end
+                    ))
+                except Exception as e:
+                    if "Shape of passed values" in str(e):
+                        print(f"ℹ️ [NO DATA] Exchange returned no data for {config.trading_pair} suffix.")
+                        return pd.DataFrame()
+                    raise e
+
                 if suffix_df is not None and not suffix_df.empty:
                     # ALIGN COLUMNS with existing file to prevent corruption
                     try:
                         header_df = pd.read_csv(cache_file, nrows=0)
-                        # Filter only columns present in both
+                        suffix_df = suffix_df.loc[:, ~suffix_df.columns.duplicated()].copy()
                         common_cols = [c for c in header_df.columns if c in suffix_df.columns]
                         suffix_df = suffix_df[common_cols]
-                        # Append to file
                         suffix_df.to_csv(cache_file, mode='a', header=False, index=False)
                         print(f"💾 [APPENDED] {len(suffix_df)} rows to {filename}")
                         return suffix_df
                     except Exception as e:
-                        print(f"⚠️ [APPEND FAILED] Falling back to Full Sync: {e}")
-                        # If append fails, we fall back to full fallback logic
+                        print(f"⚠️ [APPEND FAILED] {e}")
              else:
                 return pd.DataFrame()
 
@@ -152,39 +155,53 @@ class BacktestingEngineBase:
         if min_ts is not None and max_ts is not None:
              try:
                  print(f"📥 [HOLE FILLING] Filling gap for {config.trading_pair} within {min_ts}-{max_ts}")
-                 candle_feed = hummingbot.data_feed.candles_feed.candles_factory.CandlesFactory.get_candle(config)
-                 gap_df = await candle_feed.get_historical_candles(config=HistoricalCandlesConfig(
-                     connector_name=config.connector, trading_pair=config.trading_pair,
-                     interval=config.interval, start_time=needed_start, end_time=needed_end
-                 ))
+                 try:
+                     candle_feed = hummingbot.data_feed.candles_feed.candles_factory.CandlesFactory.get_candle(config)
+                     gap_df = await candle_feed.get_historical_candles(config=HistoricalCandlesConfig(
+                         connector_name=config.connector, trading_pair=config.trading_pair,
+                         interval=config.interval, start_time=needed_start, end_time=needed_end
+                     ))
+                 except Exception as e:
+                     if "Shape of passed values" in str(e):
+                         print(f"ℹ️ [NO DATA] No gap data for {config.trading_pair}")
+                         return pd.DataFrame()
+                     raise e
+
                  if gap_df is not None and not gap_df.empty:
                      old_df = pd.read_csv(cache_file)
-                     # Align columns
+                     old_df = old_df.loc[:, ~old_df.columns.duplicated()].copy()
+                     gap_df = gap_df.loc[:, ~gap_df.columns.duplicated()].copy()
                      common_cols = [c for c in old_df.columns if c in gap_df.columns]
-                     gap_df = gap_df[common_cols]
-                     old_df = old_df[common_cols]
-                     
-                     merged_df = pd.concat([old_df, gap_df], axis=0).drop_duplicates(subset=["timestamp"]).sort_values("timestamp")
+                     merged_df = pd.concat([old_df[common_cols], gap_df[common_cols]], axis=0, ignore_index=True)
+                     merged_df = merged_df.drop_duplicates(subset=["timestamp"]).sort_values("timestamp")
                      merged_df.to_csv(cache_file, index=False)
                      print(f"💾 [STITCHED] New file size: {len(merged_df)} rows")
                      return gap_df
              except Exception as e:
                  print(f"⚠️ [MERGE FAILED] {e}")
-                 # Fall through to Full Sync
 
         # 3. FULL FALLBACK (First time, prefix missing, or merge failed)
         try:
             print(f"📥 [FULL SYNC] Fetching {config.trading_pair}")
-            merged_df = await self.backtesting_data_provider.get_candles_feed(config)
+            try:
+                merged_df = await self.backtesting_data_provider.get_candles_feed(config)
+            except Exception as e:
+                if "Shape of passed values" in str(e):
+                    print(f"ℹ️ [NO DATA] Exchange has no history for {config.trading_pair} in this range.")
+                    return pd.DataFrame()
+                raise e
+
             if merged_df is not None and not merged_df.empty:
-                 # If file existed, try to merge one last time or just overwrite
                  if cache_file.exists():
                      try:
                          old_df = pd.read_csv(cache_file)
+                         old_df = old_df.loc[:, ~old_df.columns.duplicated()].copy()
+                         merged_df = merged_df.loc[:, ~merged_df.columns.duplicated()].copy()
                          common_cols = [c for c in old_df.columns if c in merged_df.columns]
-                         merged_df = pd.concat([old_df[common_cols], merged_df[common_cols]], axis=0).drop_duplicates(subset=["timestamp"]).sort_values("timestamp")
+                         merged_df = pd.concat([old_df[common_cols], merged_df[common_cols]], axis=0, ignore_index=True)
+                         merged_df = merged_df.drop_duplicates(subset=["timestamp"]).sort_values("timestamp")
                      except:
-                         pass # Use the new data as is
+                         pass
                  merged_df.to_csv(cache_file, index=False)
                  return merged_df
         except Exception as e:
