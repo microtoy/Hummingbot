@@ -184,7 +184,9 @@ if sync_top10:
                 
                 # Each coin might have 1 or 2 gaps (prefix and/or suffix)
                 for g_start, g_end in gaps:
-                    CHUNK_SIZE = 5 * 24 * 3600 # 5 days
+                    # Dynamic chunk: 30% of gap duration, min 5 days (in seconds)
+                    gap_duration = g_end - g_start
+                    CHUNK_SIZE = max(5 * 24 * 3600, int(gap_duration * 0.3))
                     curr = g_start
                     
                     while curr < g_end:
