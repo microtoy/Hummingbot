@@ -135,8 +135,8 @@ if sync_top10:
                 total_end = int(end_datetime.timestamp())
                 total_duration = total_end - total_start
                 
-                # Chunk size: 30 days (in seconds)
-                CHUNK_SIZE = 30 * 24 * 3600
+                # Chunk size: 7 days (in seconds) for smoother progress
+                CHUNK_SIZE = 7 * 24 * 3600
                 
                 current_start = total_start
                 chunks_processed = 0
@@ -149,7 +149,7 @@ if sync_top10:
                     
                     # Update status with percentage
                     progress_pct = min(100, int((current_start - total_start) / total_duration * 100))
-                    coin_status[pair]["status"] = f"🔄 Syncing {progress_pct}%"
+                    coin_status[pair]["status"] = f"📥 Downloading {progress_pct}%"
                     update_display()
                     
                     payload = {
