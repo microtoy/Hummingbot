@@ -46,6 +46,7 @@ if sync_to_server:
     start_datetime = datetime.combine(start_date, time.min)
     end_datetime = datetime.combine(end_date, time.max)
     with st.spinner("Syncing candles to server cache..."):
+        # Sync the primary interval
         dummy_config = {
             "controller_name": "Generic",
             "connector_name": connector,
@@ -58,11 +59,20 @@ if sync_to_server:
             backtesting_resolution=interval,
             config=dummy_config
         )
+        
+        # Also sync 1h if not already synced, as it's common for indicators
+        if interval != "1h":
+            backend_api_client.backtesting.sync_candles(
+                start_time=int(start_datetime.timestamp()),
+                end_time=int(end_datetime.timestamp()),
+                backtesting_resolution="1h",
+                config=dummy_config
+            )
+            
         if "error" in res:
             st.error(f"Sync failed: {res['error']}")
         else:
-            st.success("✅ 数据已同步到服务器磁盘！")
-            st.info("💡 **小技巧**：如果你的策略需要计算均线等指标，建议在这里同步时多选 1-2 天的数据作为 Buffer，这样回测时就能 100% 命中缓存实现秒开了。")
+            st.success("✅ 数据同步完成 (包括预热 1h 间隔)！")
             st.rerun()
 
 if get_data_button:
