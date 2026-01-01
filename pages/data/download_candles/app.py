@@ -104,77 +104,86 @@ if sync_top10:
     
     update_display()
     
-    # Run syncs in parallel with ThreadPoolExecutor (max 3 concurrent)
-    # Use 'requests' library directly to avoid asyncio event loop conflicts in threads
-    import requests
-    import os
+    # Run syncs in parallel with asyncio + independent session (for real-time UI updates)
+    import asyncio
+    import aiohttp
     
-    # 1. Extract config in MAIN THREAD to avoid accessing client object in threads
-    api_url = "http://hummingbot-api:8000"  # Default internal URL
-    api_auth = ("admin", "admin")
+    # Extract config
+    api_url = "http://hummingbot-api:8000"
+    api_auth = aiohttp.BasicAuth("admin", "admin")
     
     try:
         if hasattr(backend_api_client, "base_url"):
             api_url = backend_api_client.base_url
         if hasattr(backend_api_client, "auth") and backend_api_client.auth:
-            api_auth = (backend_api_client.auth.login, backend_api_client.auth.password)
+            api_auth = aiohttp.BasicAuth(backend_api_client.auth.login, backend_api_client.auth.password)
     except Exception:
-        pass # Fallback to defaults if any access fails
-    
-    # Define worker function that ONLY uses passed arguments
-    def sync_single_coin(pair: str, base_url: str, auth: tuple):
-        """Sync a single coin (runs in thread)."""
+        pass
+
+    # Semaphore for concurrency
+    semaphore = asyncio.Semaphore(3)
+
+    async def sync_single_coin(session: aiohttp.ClientSession, pair: str):
+        """Sync a single coin async with live status updates."""
         try:
-            # Construct payload manually since we bypass the client
-            payload = {
-                "start_time": int(start_datetime.timestamp()),
-                "end_time": int(end_datetime.timestamp()),
-                "backtesting_resolution": interval,
-                "trade_cost": 0.0006,
-                "config": {
-                    "controller_name": "Generic",
-                    "connector_name": connector,
-                    "trading_pair": pair,
-                    "candles_config": []
+            # Wait for slot
+            async with semaphore:
+                # 1. Update status to SYNCING immediately when slot obtained
+                coin_status[pair]["status"] = "🔄 Syncing..."
+                update_display()
+                
+                payload = {
+                    "start_time": int(start_datetime.timestamp()),
+                    "end_time": int(end_datetime.timestamp()),
+                    "backtesting_resolution": interval,
+                    "trade_cost": 0.0006,
+                    "config": {
+                        "controller_name": "Generic",
+                        "connector_name": connector,
+                        "trading_pair": pair,
+                        "candles_config": []
+                    }
                 }
-            }
-            
-            url = f"{base_url}/backtesting/candles/sync"
-            
-            # Use independent requests session inside thread
-            response = requests.post(url, json=payload, auth=auth, timeout=300)
-            
-            if response.status_code == 200:
-                result = response.json()
-                if result.get("status") == "success":
-                    rows = result.get("rows", 0)
-                    return {"pair": pair, "status": "✅ Done", "rows": f"{rows:,}"}
-                else:
-                    return {"pair": pair, "status": f"❌ {result.get('error', 'Error')[:30]}", "rows": "-"}
-            else:
-                return {"pair": pair, "status": f"❌ HTTP {response.status_code}", "rows": "-"}
+                
+                url = f"{api_url}/backtesting/candles/sync"
+                
+                # 2. Perform Request
+                async with session.post(url, json=payload, timeout=600) as response:
+                    if response.status == 200:
+                        result = await response.json()
+                        if result.get("status") == "success":
+                            rows = result.get("rows", 0)
+                            coin_status[pair]["status"] = "✅ Done"
+                            coin_status[pair]["rows"] = f"{rows:,}"
+                        else:
+                            short_err = str(result.get('error', 'Error'))[:30]
+                            coin_status[pair]["status"] = f"❌ {short_err}"
+                    else:
+                        coin_status[pair]["status"] = f"❌ HTTP {response.status}"
+                
+                # 3. Update Progress (Wait finished)
+                progress_tracker[0] += 1
+                progress_bar.progress(progress_tracker[0] / total, text=f"Completed {progress_tracker[0]}/{total} coins")
+                update_display()
                 
         except Exception as e:
-            return {"pair": pair, "status": f"❌ {str(e)[:25]}...", "rows": "-"}
-    
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        # Pass static config to each task
-        futures = {executor.submit(sync_single_coin, pair, api_url, api_auth): pair for pair in TOP_10_PAIRS}
-        
-        for future in as_completed(futures):
-            result = future.result()
-            pair = result["pair"]
-            coin_status[pair]["status"] = result["status"]
-            coin_status[pair]["rows"] = result["rows"]
-            
-            progress_tracker[0] += 1
-            progress_bar.progress(progress_tracker[0] / total, text=f"Completed {progress_tracker[0]}/{total} coins")
+            coin_status[pair]["status"] = f"❌ {str(e)[:25]}..."
             update_display()
+
+    async def run_parallel_sync():
+        timeout = aiohttp.ClientTimeout(total=600)
+        async with aiohttp.ClientSession(auth=api_auth, timeout=timeout) as session:
+            tasks = [sync_single_coin(session, pair) for pair in TOP_10_PAIRS]
+            await asyncio.gather(*tasks)
+
+    # Run the async loop
+    asyncio.run(run_parallel_sync())
     
     # Final summary
     success_count = sum(1 for info in coin_status.values() if "✅" in info["status"])
     progress_bar.progress(1.0, text=f"✅ Complete! {success_count}/{total} succeeded")
     st.success(f"🎉 Top 10 同步完成！成功: {success_count}/{total}")
+
 
 
 if get_data_button:
