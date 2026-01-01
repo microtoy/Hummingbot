@@ -80,6 +80,53 @@ async def sync_candles(backtesting_config: BacktestingConfig):
     except Exception as e:
         return {"error": str(e)}
 
+@router.post("/candles/batch-sync")
+async def batch_sync_candles(batch_configs: list[BacktestingConfig]):
+    """
+    Parallel sync of multiple trading pairs' candle data.
+    Uses asyncio.gather to download all pairs concurrently.
+    """
+    import asyncio
+    from types import SimpleNamespace
+    from hummingbot.data_feed.candles_feed.candles_base import CandlesBase
+    
+    async def sync_single_pair(config: BacktestingConfig):
+        """Sync a single trading pair's data."""
+        try:
+            engine = BacktestingEngineBase()
+            
+            if isinstance(config.config, dict) and "connector_name" in config.config:
+                controller_config = SimpleNamespace(
+                    connector_name=config.config["connector_name"],
+                    trading_pair=config.config["trading_pair"],
+                    candles_config=config.config.get("candles_config", [])
+                )
+            else:
+                return {"pair": "Unknown", "status": "error", "message": "Invalid config"}
+            
+            interval = config.backtesting_resolution
+            buffer_seconds = 2000 * CandlesBase.interval_to_seconds.get(interval, 60)
+            padded_start = int(config.start_time - buffer_seconds)
+            
+            engine.backtesting_data_provider.update_backtesting_time(
+                padded_start, int(config.end_time))
+            engine.controller = SimpleNamespace(config=controller_config)
+            engine.backtesting_resolution = interval
+            
+            await engine.initialize_backtesting_data_provider()
+            
+            return {"pair": controller_config.trading_pair, "status": "success"}
+        except Exception as e:
+            pair = config.config.get("trading_pair", "Unknown") if isinstance(config.config, dict) else "Unknown"
+            return {"pair": pair, "status": "error", "message": str(e)}
+    
+    # Launch ALL sync tasks concurrently
+    tasks = [sync_single_pair(config) for config in batch_configs]
+    results = await asyncio.gather(*tasks)
+    
+    success_count = sum(1 for r in results if r.get("status") == "success")
+    return {"results": list(results), "success": success_count, "total": len(batch_configs)}
+
 @router.post("/run-backtesting")
 async def run_backtesting(backtesting_config: BacktestingConfig):
     """

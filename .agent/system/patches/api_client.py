@@ -43,6 +43,9 @@ class PatchedBacktestingRouter(BacktestingRouter):
         """Run multiple backtests in parallel on the server."""
         return await self._post("/backtesting/batch-run", json=batch_configs)
 
+    async def batch_sync(self, batch_configs: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Sync multiple trading pairs' candle data in parallel."""
+        return await self._post("/backtesting/candles/batch-sync", json=batch_configs)
 
 class PatchedMarketDataRouter(MarketDataRouter):
     """Extended MarketDataRouter with increased timeout for historical candles."""

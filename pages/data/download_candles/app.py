@@ -81,31 +81,40 @@ if sync_top10:
     start_datetime = datetime.combine(start_date, time.min)
     end_datetime = datetime.combine(end_date, time.max)
     
-    progress = st.progress(0, text="Preparing to sync Top 10 coins...")
-    success_count = 0
-    
-    for i, pair in enumerate(TOP_10_PAIRS):
-        progress.progress((i + 1) / len(TOP_10_PAIRS), text=f"Syncing {pair}... ({i+1}/{len(TOP_10_PAIRS)})")
+    with st.status(f"🔥 Parallel syncing Top 10 coins...", expanded=True) as status:
+        # Build batch configs
+        batch_configs = []
+        for pair in TOP_10_PAIRS:
+            batch_configs.append({
+                "config": {
+                    "controller_name": "Generic",
+                    "connector_name": connector,
+                    "trading_pair": pair,
+                    "candles_config": []
+                },
+                "start_time": int(start_datetime.timestamp()),
+                "end_time": int(end_datetime.timestamp()),
+                "backtesting_resolution": interval,
+                "trade_cost": 0.0006
+            })
+        
         try:
-            config = {
-                "controller_name": "Generic",
-                "connector_name": connector,
-                "trading_pair": pair,
-                "candles_config": []
-            }
-            backend_api_client.backtesting.sync_candles(
-                start_time=int(start_datetime.timestamp()),
-                end_time=int(end_datetime.timestamp()),
-                backtesting_resolution=interval,
-                config=config
-            )
-            success_count += 1
+            result = backend_api_client.backtesting.batch_sync(batch_configs)
+            if "results" in result:
+                success_count = result.get("success", 0)
+                total = result.get("total", len(TOP_10_PAIRS))
+                status.update(label=f"✅ Parallel sync complete! {success_count}/{total} succeeded", state="complete")
+                
+                # Show individual results
+                for r in result["results"]:
+                    if r.get("status") == "success":
+                        st.write(f"✅ {r['pair']}")
+                    else:
+                        st.write(f"❌ {r['pair']}: {r.get('message', 'Unknown error')}")
+            else:
+                st.error(f"Sync failed: {result.get('error', 'Unknown error')}")
         except Exception as e:
-            st.warning(f"⚠️ {pair}: {e}")
-    
-    progress.progress(1.0, text="Done!")
-    st.success(f"✅ Top 10 批量同步完成！成功: {success_count}/{len(TOP_10_PAIRS)}")
-    st.rerun()
+            st.error(f"Error: {e}")
 
 if get_data_button:
     start_datetime = datetime.combine(start_date, time.min)
