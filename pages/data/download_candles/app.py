@@ -104,33 +104,54 @@ if sync_top10:
     
     update_display()
     
+    # Run syncs in parallel with ThreadPoolExecutor (max 3 concurrent)
+    # Use 'requests' library directly to avoid asyncio event loop conflicts in threads
+    import requests
+    
     def sync_single_coin(pair: str):
         """Sync a single coin (runs in thread)."""
         try:
             coin_status[pair]["status"] = "🔄 Syncing..."
             
-            config = {
-                "controller_name": "Generic",
-                "connector_name": connector,
-                "trading_pair": pair,
-                "candles_config": []
+            # Construct payload manually since we bypass the client
+            payload = {
+                "start_time": int(start_datetime.timestamp()),
+                "end_time": int(end_datetime.timestamp()),
+                "backtesting_resolution": interval,
+                "trade_cost": 0.0006,
+                "config": {
+                    "controller_name": "Generic",
+                    "connector_name": connector,
+                    "trading_pair": pair,
+                    "candles_config": []
+                }
             }
-            result = backend_api_client.backtesting.sync_candles(
-                start_time=int(start_datetime.timestamp()),
-                end_time=int(end_datetime.timestamp()),
-                backtesting_resolution=interval,
-                config=config
-            )
             
-            if result.get("status") == "success":
-                rows = result.get("rows", 0)
-                return {"pair": pair, "status": "✅ Done", "rows": f"{rows:,}"}
+            # Use basic auth from client if available, or assume default admin/admin
+            auth = None
+            if hasattr(backend_api_client, "auth") and backend_api_client.auth:
+                # aiohttp.BasicAuth -> (login, password)
+                auth = (backend_api_client.auth.login, backend_api_client.auth.password)
             else:
-                return {"pair": pair, "status": f"❌ {result.get('error', 'Error')[:30]}", "rows": "-"}
+                auth = ("admin", "admin")
+                
+            url = f"{backend_api_client.base_url}/backtesting/candles/sync"
+            
+            response = requests.post(url, json=payload, auth=auth, timeout=300)
+            
+            if response.status_code == 200:
+                result = response.json()
+                if result.get("status") == "success":
+                    rows = result.get("rows", 0)
+                    return {"pair": pair, "status": "✅ Done", "rows": f"{rows:,}"}
+                else:
+                    return {"pair": pair, "status": f"❌ {result.get('error', 'Error')[:30]}", "rows": "-"}
+            else:
+                return {"pair": pair, "status": f"❌ HTTP {response.status_code}", "rows": "-"}
+                
         except Exception as e:
             return {"pair": pair, "status": f"❌ {str(e)[:25]}...", "rows": "-"}
     
-    # Run syncs in parallel with ThreadPoolExecutor (max 3 concurrent)
     with ThreadPoolExecutor(max_workers=3) as executor:
         futures = {executor.submit(sync_single_coin, pair): pair for pair in TOP_10_PAIRS}
         
