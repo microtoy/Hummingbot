@@ -20,12 +20,12 @@ class MACrossStrategyConfig(DirectionalTradingControllerConfigBase):
     controller_name: str = "ma_cross_strategy"
     
     # Strategy specific parameters
-    fast_ma: int = Field(default=20, description="Fast MA period")
-    slow_ma: int = Field(default=50, description="Slow MA period")
+    fast_ma: int = Field(default=5, description="Fast MA period")
+    slow_ma: int = Field(default=10, description="Slow MA period")
     
     # Standard directional fields
     connector_name: str = Field(default="binance", description="The connector to use")
-    trading_pair: str = Field(default="BTC-USDT", description="The trading pair to trade")
+    trading_pair: str = Field(default="XRP-USDT", description="The trading pair to trade")
     total_amount_quote: Decimal = Field(default=Decimal("100"), description="Initial amount in quote per trade")
     
     # Risk Management (Triple Barrier)
