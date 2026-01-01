@@ -8,12 +8,12 @@ from hummingbot.strategy_v2.controllers.directional_trading_controller_base impo
     DirectionalTradingControllerBase,
     DirectionalTradingControllerConfigBase,
 )
-from hummingbot.strategy_v2.executors.position_executor.data_types import PositionExecutorConfig
+from hummingbot.strategy_v2.executors.position_executor.data_types import PositionExecutorConfig, TripleBarrierConfig
 
 
 class MACrossStrategyConfig(DirectionalTradingControllerConfigBase):
     """
-    Configuration for a Simple Moving Average Cross Strategy with Risk Management.
+    Configuration for a Simple Moving Average Cross Strategy with Risk Management and Compounding.
     """
     controller_name: str = "ma_cross_strategy"
     
@@ -21,15 +21,18 @@ class MACrossStrategyConfig(DirectionalTradingControllerConfigBase):
     fast_ma: int = Field(default=20, description="Fast MA period")
     slow_ma: int = Field(default=50, description="Slow MA period")
     
-    # Standard directional fields (overriding defaults if needed)
+    # Standard directional fields
     connector_name: str = Field(default="binance", description="The connector to use")
     trading_pair: str = Field(default="BTC-USDT", description="The trading pair to trade")
-    total_amount_quote: Decimal = Field(default=Decimal("100"), description="Total amount in quote")
+    total_amount_quote: Decimal = Field(default=Decimal("100"), description="Initial amount in quote per trade")
     
-    # Risk Management (Triple Barrier) - These override base class fields
+    # Risk Management (Triple Barrier)
     stop_loss: Optional[Decimal] = Field(default=Decimal("0.02"), description="Stop loss threshold (e.g., 0.02 for 2%)")
     take_profit: Optional[Decimal] = Field(default=Decimal("0.05"), description="Take profit threshold (e.g., 0.05 for 5%)")
     time_limit: Optional[int] = Field(default=21600, description="Time limit in seconds (e.g., 21600 for 6h)")
+    
+    # [NEW] Compounding
+    use_compounding: bool = Field(default=False, description="Reinvest profits by scaling trade size based on PNL")
     
     # We need candles for the MA calculation
     candles_config: List[CandlesConfig] = Field(default=[])
@@ -41,30 +44,22 @@ class MACrossStrategyConfig(DirectionalTradingControllerConfigBase):
 
 class MACrossStrategyController(DirectionalTradingControllerBase):
     """
-    Implementation of an MA Cross controller that calculates signals.
-    The base class DirectionalTradingControllerBase handles the Triple Barrier logic
-    automatically using the fields defined in the Config.
+    Implementation of an MA Cross controller with Triple Barrier and optional Compounding.
     """
     def __init__(self, config: MACrossStrategyConfig, *args, **kwargs):
-        # Add the required candles config if not present
         if not config.candles_config:
             config.candles_config = [
                 CandlesConfig(connector=config.connector_name, trading_pair=config.trading_pair, interval="1h", max_records=500)
             ]
-        
-        # NOTE: Do NOT set config.triple_barrier_config manually.
-        # It is a property in the base class that is computed from stop_loss, take_profit, and time_limit.
         
         super().__init__(config, *args, **kwargs)
         self.config = config
 
     async def update_processed_data(self):
         """
-        Calculates MAs and determines signal for the whole dataset for backtesting.
+        Calculates MAs and determines signal for the whole dataset.
         """
-        # Use the first candles config interval
         interval = self.config.candles_config[0].interval if self.config.candles_config else "1h"
-        # Use .copy() to avoid SettingWithCopyWarning
         candles = self.market_data_provider.get_candles_df(self.config.connector_name, self.config.trading_pair, interval).copy()
         
         if len(candles) < self.config.slow_ma:
@@ -72,11 +67,9 @@ class MACrossStrategyController(DirectionalTradingControllerBase):
             self.processed_data = {"signal": 0, "features": candles}
             return
 
-        # Time-series calculation for backtesting engine
         candles["fast_ma"] = candles["close"].rolling(window=self.config.fast_ma).mean()
         candles["slow_ma"] = candles["close"].rolling(window=self.config.slow_ma).mean()
         
-        # Determine signals
         candles["signal"] = 0
         candles.loc[(candles["fast_ma"] > candles["slow_ma"]) & (candles["fast_ma"].shift(1) <= candles["slow_ma"].shift(1)), "signal"] = 1
         candles.loc[(candles["fast_ma"] < candles["slow_ma"]) & (candles["fast_ma"].shift(1) >= candles["slow_ma"].shift(1)), "signal"] = -1
@@ -85,3 +78,21 @@ class MACrossStrategyController(DirectionalTradingControllerBase):
             "signal": int(candles["signal"].iloc[-1]),
             "features": candles
         }
+
+    def get_executor_config(self, trade_type, price, amount):
+        """
+        Override to implement compounding logic if enabled.
+        """
+        actual_amount = amount
+        
+        if self.config.use_compounding:
+            # Calculate total PNL from closed executors to determine current 'virtual balance'
+            # Note: In backtesting, this is simulated mathematically in the engine patch for performance.
+            # In live, we can use the actual performance.
+            total_net_pnl_quote = sum([e.net_pnl_quote for e in self.executors_info if not e.is_active], Decimal("0"))
+            profit_factor = (self.config.total_amount_quote + total_net_pnl_quote) / self.config.total_amount_quote
+            # Cap the scaling to avoid extreme sizes if needed, but here we go full compounding
+            if profit_factor > 0:
+                actual_amount = amount * profit_factor
+
+        return super().get_executor_config(trade_type, price, actual_amount)

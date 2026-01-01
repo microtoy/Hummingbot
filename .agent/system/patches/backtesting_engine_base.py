@@ -253,7 +253,29 @@ class BacktestingEngineBase:
     def summarize_results(executors_info: List, total_amount_quote: float = 1000):
         if len(executors_info) > 0:
             executors_df = pd.DataFrame([ei.to_dict() for ei in executors_info])
-            net_pnl_quote = executors_df["net_pnl_quote"].sum()
+            
+            # Check for compounding flag in the controller config
+            use_compounding = False
+            if not executors_df.empty and "config" in executors_df.columns:
+                try:
+                    # Look deep into the config dictionary
+                    conf_dict = executors_df["config"].iloc[0]
+                    if isinstance(conf_dict, dict):
+                        use_compounding = conf_dict.get("controller_config", {}).get("use_compounding", False)
+                except Exception:
+                    pass
+
+            if use_compounding:
+                # Geometric PNL calculation
+                executors_df["return_pct"] = executors_df["net_pnl_quote"] / executors_df["filled_amount_quote"]
+                executors_df["account_multiplier"] = (1 + executors_df["return_pct"]).cumprod()
+                final_multiplier = executors_df["account_multiplier"].iloc[-1]
+                net_pnl_quote = total_amount_quote * (final_multiplier - 1)
+                cumulative_returns = total_amount_quote * (executors_df["account_multiplier"] - 1)
+            else:
+                net_pnl_quote = executors_df["net_pnl_quote"].sum()
+                cumulative_returns = executors_df["net_pnl_quote"].cumsum()
+                
             total_executors = executors_df.shape[0]
             executors_with_position = executors_df[executors_df["net_pnl_quote"] != 0]
             total_executors_with_position = executors_with_position.shape[0]
@@ -272,7 +294,14 @@ class BacktestingEngineBase:
             win_signals = executors_with_position[executors_with_position["net_pnl_quote"] > 0]
             loss_signals = executors_with_position[executors_with_position["net_pnl_quote"] < 0]
             accuracy = (win_signals.shape[0] / total_positions) if total_positions else 0.0
-            cumulative_returns = executors_with_position["net_pnl_quote"].cumsum()
+            
+            # Use the calculated cumulative_returns (from compounding or simple sum)
+            if use_compounding:
+                # Need to filter the already calculated series for positions only
+                cumulative_returns = total_amount_quote * (executors_with_position["account_multiplier"] - 1)
+            else:
+                cumulative_returns = executors_with_position["net_pnl_quote"].cumsum()
+                
             executors_with_position["cumulative_returns"] = cumulative_returns
             executors_with_position["cumulative_volume"] = executors_with_position["filled_amount_quote"].cumsum()
             executors_with_position["inventory"] = total_amount_quote + cumulative_returns
