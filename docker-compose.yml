@@ -25,7 +25,7 @@ services:
     volumes:
       - ./bots:/hummingbot-api/bots
       - ./custom_strategies:/hummingbot-api/bots/controllers/custom
-      - ./scripts/patches/backtesting_engine_base.py:/opt/conda/envs/hummingbot-api/lib/python3.12/site-packages/hummingbot/strategy_v2/backtesting/backtesting_engine_base.py
+      - ./system/patches/backtesting_engine_base.py:/opt/conda/envs/hummingbot-api/lib/python3.12/site-packages/hummingbot/strategy_v2/backtesting/backtesting_engine_base.py
       - /var/run/docker.sock:/var/run/docker.sock
     env_file:
       - .env

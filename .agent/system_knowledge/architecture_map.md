@@ -27,7 +27,7 @@ We established a mechanism where files in the `custom_strategies/` directory are
 ### 4. Known Data Normalization Fixes
 - **Backtesting Engine JSON Crash**: When Sharpe ratio is `inf` (std=0), `json.dumps` fails with `ValueError: Out of range float values...`.
   - *Fix*: Patched `hummingbot/strategy_v2/backtesting/backtesting_engine_base.py` at line 286 to check `returns.std() != 0`.
-  - *Persistence*: The patched file is stored in `scripts/patches/` and mounted back into the container via `docker-compose.yml`.
+  - *Persistence*: The patched file is stored in `system/patches/` and mounted back into the container via `docker-compose.yml`.
 - **Pandas SettingWithCopyWarning**: Modifying candle slices in `update_processed_data` caused warnings and log noise.
   - *Fix*: Use `.copy()` on dataframes returned by `market_data_provider`.
 
