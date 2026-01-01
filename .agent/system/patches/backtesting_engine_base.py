@@ -140,7 +140,27 @@ class BacktestingEngineBase:
         for config in self.controller.config.candles_config:
             await self._get_candles_with_cache(config)
 
-    async def _get_candles_with_cache(self, config: CandlesConfig):
+    def _load_candle_slice(self, cache_file: Path, needed_start: int, needed_end: int) -> pd.DataFrame:
+        """Loads only the required slice of a CSV file using indexed seeking logic."""
+        try:
+            # Step 1: Extremely fast scan of just the timestamp column to find indices
+            ts_df = pd.read_csv(cache_file, usecols=["timestamp"])
+            mask = (ts_df["timestamp"] >= needed_start) & (ts_df["timestamp"] <= needed_end)
+            if not mask.any():
+                return pd.DataFrame()
+            
+            start_idx = int(mask.idxmax())
+            count = int(mask.sum())
+            
+            # Step 2: Reload only the relevant chunk using the found indices
+            # skiprows=range(1, start_idx + 1) keeps row 0 (header) and skips up to start_idx
+            return pd.read_csv(cache_file, header=0, skiprows=range(1, start_idx + 1), nrows=count)
+        except Exception as e:
+            print(f"⚠️ [SLICE ERROR] Falling back to full load: {e}")
+            full_df = pd.read_csv(cache_file)
+            return full_df[(full_df["timestamp"] >= needed_start) & (full_df["timestamp"] <= needed_end)].copy()
+
+    async def _get_candles_with_cache(self, config: CandlesConfig) -> pd.DataFrame:
         """Helper to get candles with extreme efficiency using binary metadata checks and append mode."""
         import hummingbot
         import time
@@ -184,12 +204,10 @@ class BacktestingEngineBase:
             except Exception as e:
                 print(f"⚠️ [META ERROR] {e}")
 
-        # 1. PERFECT HIT CHECK
         if min_ts is not None and max_ts is not None:
             if min_ts <= needed_start and max_ts >= effective_needed_end - 86400:
-                print(f"✅ [CACHE HIT] {filename} covers requirements.")
-                full_df = pd.read_csv(cache_file)
-                result_df = full_df[(full_df["timestamp"] >= needed_start) & (full_df["timestamp"] <= needed_end)].copy()
+                print(f"✅ [CACHE HIT] {filename} covers requirements. Slicing...")
+                result_df = self._load_candle_slice(cache_file, needed_start, needed_end)
                 key = self.backtesting_data_provider._generate_candle_feed_key(config)
                 self.backtesting_data_provider.candles_feeds[key] = result_df
                 return result_df
@@ -210,16 +228,14 @@ class BacktestingEngineBase:
                 if suffix_df is not None and not suffix_df.empty:
                     suffix_df.to_csv(cache_file, mode='a', header=False, index=False)
                     print(f"💾 [APPENDED] {len(suffix_df)} rows to {filename}")
-                    # Reload for backtesting consistency
-                    full_df = pd.read_csv(cache_file)
-                    result_df = full_df[(full_df["timestamp"] >= needed_start) & (full_df["timestamp"] <= needed_end)].copy()
+                    # Indexed reload
+                    result_df = self._load_candle_slice(cache_file, needed_start, needed_end)
                     key = self.backtesting_data_provider._generate_candle_feed_key(config)
                     self.backtesting_data_provider.candles_feeds[key] = result_df
                     return result_df
              else:
-                # Close enough, just read what we have
-                full_df = pd.read_csv(cache_file)
-                result_df = full_df[(full_df["timestamp"] >= needed_start) & (full_df["timestamp"] <= needed_end)].copy()
+                # Close enough, indexed reload
+                result_df = self._load_candle_slice(cache_file, needed_start, needed_end)
                 key = self.backtesting_data_provider._generate_candle_feed_key(config)
                 self.backtesting_data_provider.candles_feeds[key] = result_df
                 return result_df

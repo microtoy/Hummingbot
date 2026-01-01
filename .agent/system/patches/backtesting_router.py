@@ -9,8 +9,97 @@ import pandas as pd
 import hummingbot
 
 router = APIRouter(tags=["Backtesting"], prefix="/backtesting")
-candles_factory = CandlesFactory()
-backtesting_engine = BacktestingEngineBase()
+
+# --- WORKER FUNCTION FOR PROCESS POOL (Must be top-level for pickling) ---
+def run_process_safe_backtest(config_data: dict, start: int, end: int, resolution: str, trade_cost: float):
+    """
+    Standalone function running in a separate, clean process (via spawn).
+    Enforces a 'Network Blackout' to prevent any asyncio loop collisions.
+    """
+    # 1. NETWORK BLACKOUT: Mock all network-related modules BEFORE any HB imports
+    from unittest.mock import MagicMock, AsyncMock
+    import sys
+    import asyncio
+    
+    # Mocking aiohttp to be async-friendly
+    mock_aiohttp = MagicMock()
+    mock_session = AsyncMock()
+    mock_session.__aenter__.return_value = mock_session
+    mock_aiohttp.ClientSession.return_value = mock_session
+    sys.modules['aiohttp'] = mock_aiohttp
+    
+    # Mocking HB Networking components - MUST use AsyncMock for things that are awaited!
+    mock_sync_mod = MagicMock()
+    mock_sync_class = MagicMock()
+    mock_sync_instance = AsyncMock() 
+    mock_sync_class.get_instance.return_value = mock_sync_instance
+    mock_sync_class.return_value = mock_sync_instance
+    mock_sync_mod.TimeSynchronizer = mock_sync_class
+    sys.modules['hummingbot.connector.time_synchronizer'] = mock_sync_mod
+    
+    # [NEW] Mocking MarketDataProvider and OrderBookTracker to stop background threads/tasks
+    sys.modules['hummingbot.data_feed.market_data_provider'] = MagicMock()
+    sys.modules['hummingbot.core.data_type.order_book_tracker'] = MagicMock()
+    
+    # Mocking CandlesFactory - candles feeds often have awaited start/stop/get methods
+    mock_factory_mod = MagicMock()
+    mock_factory_class = MagicMock()
+    mock_factory_class.get_candle.return_value = AsyncMock()
+    mock_factory_mod.CandlesFactory = mock_factory_class
+    sys.modules['hummingbot.data_feed.candles_feed.candles_factory'] = mock_factory_mod
+
+    # 2. Delayed imports of HB logic (now safe)
+    from hummingbot.strategy_v2.backtesting.backtesting_engine_base import BacktestingEngineBase
+    from config import settings
+
+    async def _async_run():
+        local_engine = BacktestingEngineBase()
+        local_engine.allow_download = False # ENFORCE LOCAL ONLY
+        
+        # Reconstruct controller config
+        if isinstance(config_data, str):
+            controller_config = local_engine.get_controller_config_instance_from_yml(
+                config_path=config_data,
+                controllers_conf_dir_path=settings.app.controllers_path,
+                controllers_module=settings.app.controllers_module
+            )
+        else:
+            controller_config = local_engine.get_controller_config_instance_from_dict(
+                config_data=config_data,
+                controllers_module=settings.app.controllers_module
+            )
+            
+        try:
+            bt_result = await local_engine.run_backtesting(
+                controller_config=controller_config,
+                trade_cost=trade_cost,
+                start=start,
+                end=end,
+                backtesting_resolution=resolution
+            )
+            
+            summary = bt_result["results"]
+            # Convert results to native types for pickling
+            return {
+                "trading_pair": controller_config.trading_pair,
+                "net_pnl": float(summary.get("net_pnl", 0)),
+                "net_pnl_quote": float(summary.get("net_pnl_quote", 0)),
+                "accuracy": float(summary.get("accuracy", 0)),
+                "sharpe_ratio": float(summary.get("sharpe_ratio", 0) or 0),
+                "max_drawdown_pct": float(summary.get("max_drawdown_pct", 0)),
+                "profit_factor": float(summary.get("profit_factor", 0)),
+                "total_positions": int(summary.get("total_positions", 0)),
+                "performance": bt_result.get("performance", {})
+            }
+        finally:
+            # Cleanup any lingering tasks
+            try:
+                tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+                for task in tasks: task.cancel()
+            except: pass
+
+    # Run in a fresh loop in this process
+    return asyncio.run(_async_run())
 
 
 @router.get("/candles/status")
@@ -54,13 +143,15 @@ async def sync_candles(backtesting_config: BacktestingConfig):
                 candles_config=backtesting_config.config.get("candles_config", [])
             )
         elif isinstance(backtesting_config.config, str):
-            controller_config = backtesting_engine.get_controller_config_instance_from_yml(
+            engine = BacktestingEngineBase()
+            controller_config = engine.get_controller_config_instance_from_yml(
                 config_path=backtesting_config.config,
                 controllers_conf_dir_path=settings.app.controllers_path,
                 controllers_module=settings.app.controllers_module
             )
         else:
-            controller_config = backtesting_engine.get_controller_config_instance_from_dict(
+            engine = BacktestingEngineBase()
+            controller_config = engine.get_controller_config_instance_from_dict(
                 config_data=backtesting_config.config,
                 controllers_module=settings.app.controllers_module
             )
@@ -72,12 +163,13 @@ async def sync_candles(backtesting_config: BacktestingConfig):
         padded_start = int(backtesting_config.start_time - buffer_seconds)
         
         # 3. Trigger initialization (which hits the smart cache in engine)
-        backtesting_engine.backtesting_data_provider.update_backtesting_time(
+        engine = BacktestingEngineBase()
+        engine.backtesting_data_provider.update_backtesting_time(
             padded_start, int(backtesting_config.end_time))
-        backtesting_engine.controller = SimpleNamespace(config=controller_config)
-        backtesting_engine.backtesting_resolution = interval
+        engine.controller = SimpleNamespace(config=controller_config)
+        engine.backtesting_resolution = interval
         
-        await backtesting_engine.initialize_backtesting_data_provider()
+        await engine.initialize_backtesting_data_provider()
         
         # 4. Get row count from cache file
         cache_dir = Path(hummingbot.data_path()) / "candles"
@@ -101,6 +193,49 @@ async def sync_candles(backtesting_config: BacktestingConfig):
     except Exception as e:
         return {"error": str(e)}
 
+@router.post("/run-backtesting")
+async def run_backtesting(backtesting_config: BacktestingConfig):
+    """
+    Run a single backtesting simulation.
+    """
+    try:
+        engine = BacktestingEngineBase()
+        if isinstance(backtesting_config.config, str):
+            controller_config = engine.get_controller_config_instance_from_yml(
+                config_path=backtesting_config.config,
+                controllers_conf_dir_path=settings.app.controllers_path,
+                controllers_module=settings.app.controllers_module
+            )
+        else:
+            controller_config = engine.get_controller_config_instance_from_dict(
+                config_data=backtesting_config.config,
+                controllers_module=settings.app.controllers_module
+            )
+            
+        backtesting_results = await engine.run_backtesting(
+            controller_config=controller_config,
+            trade_cost=backtesting_config.trade_cost,
+            start=int(backtesting_config.start_time),
+            end=int(backtesting_config.end_time),
+            backtesting_resolution=backtesting_config.backtesting_resolution
+        )
+        
+        # Format response for frontend
+        processed_data = backtesting_results["processed_data"]["features"].fillna(0)
+        executors_info = [e.to_dict() for e in backtesting_results["executors"]]
+        
+        response = {
+            "executors": executors_info,
+            "processed_data": processed_data.to_dict(),
+            "results": backtesting_results["results"],
+        }
+        if "performance" in backtesting_results:
+            response["performance"] = backtesting_results["performance"]
+            
+        return response
+    except Exception as e:
+        return {"error": str(e)}
+
 @router.post("/candles/batch-sync")
 async def batch_sync_candles(batch_configs: list[BacktestingConfig]):
     """
@@ -115,7 +250,7 @@ async def batch_sync_candles(batch_configs: list[BacktestingConfig]):
     
     # Higher concurrency (3) with shorter delay (0.2s) for better throughput
     # Binance limit is 2400 req/min = 40 req/sec, we're well under that
-    semaphore = asyncio.Semaphore(3)
+    semaphore = asyncio.Semaphore(5)
     
     async def sync_single_pair(config: BacktestingConfig):
         """Sync a single trading pair's data with rate limiting."""
@@ -170,140 +305,92 @@ async def batch_sync_candles(batch_configs: list[BacktestingConfig]):
     success_count = sum(1 for r in results if r.get("status") == "success")
     return {"results": list(results), "success": success_count, "total": len(batch_configs)}
 
-@router.post("/run-backtesting")
-async def run_backtesting(backtesting_config: BacktestingConfig):
-    """
-    Run a backtesting simulation with the provided configuration.
-    
-    Args:
-        backtesting_config: Configuration for the backtesting including start/end time,
-                          resolution, trade cost, and controller config
-                          
-    Returns:
-        Dictionary containing executors, processed data, and results from the backtest
-        
-    Raises:
-        Returns error dictionary if backtesting fails
-    """
-    try:
-        if isinstance(backtesting_config.config, str):
-            controller_config = backtesting_engine.get_controller_config_instance_from_yml(
-                config_path=backtesting_config.config,
-                controllers_conf_dir_path=settings.app.controllers_path,
-                controllers_module=settings.app.controllers_module
-            )
-        else:
-            controller_config = backtesting_engine.get_controller_config_instance_from_dict(
-                config_data=backtesting_config.config,
-                controllers_module=settings.app.controllers_module
-            )
-        backtesting_results = await backtesting_engine.run_backtesting(
-            controller_config=controller_config, trade_cost=backtesting_config.trade_cost,
-            start=int(backtesting_config.start_time), end=int(backtesting_config.end_time),
-            backtesting_resolution=backtesting_config.backtesting_resolution)
-        processed_data = backtesting_results["processed_data"]["features"].fillna(0)
-        executors_info = [e.to_dict() for e in backtesting_results["executors"]]
-        backtesting_results["processed_data"] = processed_data.to_dict()
-        results = backtesting_results["results"]
-        results["sharpe_ratio"] = results["sharpe_ratio"] if results["sharpe_ratio"] is not None else 0
-        
-        # Include performance report if available
-        response = {
-            "executors": executors_info,
-            "processed_data": backtesting_results["processed_data"],
-            "results": backtesting_results["results"],
-        }
-        if "performance" in backtesting_results:
-            response["performance"] = backtesting_results["performance"]
-            
-        return response
-    except Exception as e:
-        return {"error": str(e)}
 @router.post("/batch-run")
 async def batch_run_backtesting(batch_configs: list[BacktestingConfig]):
     """
-    Two-phase batch backtesting for maximum performance:
-    Phase 1: Parallel cache warming (all coins download data concurrently)
-    Phase 2: Sequential execution (each backtest is ~3ms after cache hit)
+    Super-Accelerated Batch Backtesting:
+    Phase 1: Concurrent Cache Check (Low Latency)
+    Phase 2: Multi-Process Execution (ProcessPoolExecutor) for true 10-core parallelism.
     """
     import asyncio
-    from types import SimpleNamespace
-    from hummingbot.data_feed.candles_feed.data_types import CandlesConfig as HBCandlesConfig
+    import multiprocessing as mp
+    import os
+    from concurrent.futures import ProcessPoolExecutor
+    from pathlib import Path
+    import hummingbot
     
-    # Phase 1: Pre-warm cache for ALL trading pairs in parallel
+    # Phase 1: FAST Cache Verification (Skip redundant memory loading in main process)
     async def warm_cache(config: BacktestingConfig):
-        """Download and cache data for a single trading pair."""
         try:
-            engine = BacktestingEngineBase()
-            if isinstance(config.config, dict):
-                trading_pair = config.config.get("trading_pair", "BTC-USDT")
-                connector = config.config.get("connector_name", "binance")
-            else:
-                return  # Skip non-dict configs for warming
+            if not isinstance(config.config, dict): return False
             
-            # Set up minimal engine state for cache warming
+            trading_pair = config.config.get("trading_pair", "BTC-USDT")
+            connector = config.config.get("connector_name", "binance")
+            interval = config.backtesting_resolution
+            
+            cache_dir = Path(hummingbot.data_path()) / "candles"
+            filename = f"{connector}_{trading_pair}_{interval}.csv"
+            cache_file = cache_dir / filename
+            
+            # [LATENCY OPTIMIZATION]
+            # If the file exists, we DON'T load it in the main process.
+            # We trust the child processes to handle their own IO if the file is already there.
+            if cache_file.exists() and cache_file.stat().st_size > 0:
+                return True
+                
+            # Only if file is missing, we use the engine to potentially download (if allowed)
+            engine = BacktestingEngineBase()
+            # engine.allow_download is user-controlled via config or global flag
+            # For now, we respect the engine's default or the last user set value
             engine.backtesting_data_provider.update_backtesting_time(
                 int(config.start_time), int(config.end_time))
-            engine.backtesting_resolution = config.backtesting_resolution
+            engine.backtesting_resolution = interval
             
-            # Minimal controller config just for data loading
+            from types import SimpleNamespace
             engine.controller = SimpleNamespace(config=SimpleNamespace(
-                connector_name=connector,
-                trading_pair=trading_pair,
-                candles_config=[]
+                connector_name=connector, trading_pair=trading_pair, candles_config=[]
             ))
-            
+            # This only runs if the cache check above failed
             await engine.initialize_backtesting_data_provider()
-            return f"✅ {trading_pair}"
-        except Exception as e:
-            return f"❌ {config.config.get('trading_pair', 'Unknown')}: {e}"
+            return True
+        except: return False
+
+    # Launch cache checks. With local data, this will return almost instantly.
+    await asyncio.gather(*[warm_cache(cfg) for cfg in batch_configs])
     
-    # Launch ALL cache warming tasks concurrently
-    cache_tasks = [warm_cache(config) for config in batch_configs]
-    await asyncio.gather(*cache_tasks)
+    # Phase 2: CPU Bound Backtesting - Using ProcessPool with 'spawn' context
+    loop = asyncio.get_running_loop()
+    spawn_ctx = mp.get_context('spawn')
     
-    # Phase 2: Sequential execution (now all data is cached, each takes ~3ms)
-    results = []
-    for config in batch_configs:
-        try:
-            if isinstance(config.config, str):
-                controller_config = backtesting_engine.get_controller_config_instance_from_yml(
-                    config_path=config.config,
-                    controllers_conf_dir_path=settings.app.controllers_path,
-                    controllers_module=settings.app.controllers_module
-                )
-            else:
-                controller_config = backtesting_engine.get_controller_config_instance_from_dict(
-                    config_data=config.config,
-                    controllers_module=settings.app.controllers_module
-                )
-            
-            bt_result = await backtesting_engine.run_backtesting(
-                controller_config=controller_config,
-                trade_cost=config.trade_cost,
-                start=int(config.start_time),
-                end=int(config.end_time),
-                backtesting_resolution=config.backtesting_resolution
+    # Limit max_workers to 8 to avoid saturation or descriptor exhaustion
+    # Also provides more stability than dynamic CPU count
+    with ProcessPoolExecutor(max_workers=10, mp_context=spawn_ctx) as pool:
+        tasks = []
+        for config in batch_configs:
+            task = loop.run_in_executor(
+                pool,
+                run_process_safe_backtest,
+                config.config,
+                int(config.start_time),
+                int(config.end_time),
+                config.backtesting_resolution,
+                config.trade_cost
             )
-            
-            summary = bt_result["results"]
-            results.append({
-                "trading_pair": controller_config.trading_pair,
-                "net_pnl": summary.get("net_pnl", 0),
-                "net_pnl_quote": summary.get("net_pnl_quote", 0),
-                "accuracy": summary.get("accuracy", 0),
-                "sharpe_ratio": summary.get("sharpe_ratio", 0) or 0,
-                "max_drawdown_pct": summary.get("max_drawdown_pct", 0),
-                "profit_factor": summary.get("profit_factor", 0),
-                "total_positions": summary.get("total_positions", 0),
-                "performance": bt_result.get("performance", {})
-            })
-        except Exception as e:
-            results.append({
-                "trading_pair": config.config.get("trading_pair", "Unknown") if isinstance(config.config, dict) else "Unknown",
-                "error": str(e),
-                "net_pnl": 0, "net_pnl_quote": 0, "accuracy": 0, "sharpe_ratio": 0,
-                "max_drawdown_pct": 0, "profit_factor": 0, "total_positions": 0
-            })
+            tasks.append(task)
+        
+        results = await asyncio.gather(*tasks, return_exceptions=True)
     
-    return {"results": results}
+    final_results = []
+    for i, res in enumerate(results):
+        if isinstance(res, Exception):
+            cfg = batch_configs[i]
+            pair = cfg.config.get("trading_pair", "Unknown") if isinstance(cfg.config, dict) else "Unknown"
+            final_results.append({
+                "trading_pair": pair, "error": str(res),
+                "net_pnl": 0, "net_pnl_quote": 0, "accuracy": 0, "sharpe_ratio": 0,
+                "max_drawdown_pct": 0, "profit_factor": 0, "total_positions": 0, "performance": {}
+            })
+        else:
+            final_results.append(res)
+
+    return {"results": final_results}
