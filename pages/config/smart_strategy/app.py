@@ -127,12 +127,21 @@ def safe_backtesting_section(inputs, backend_api_client):
     bt_mode = st.radio("Mode", ["Single Coin", "🚀 Batch Comparison"], horizontal=True, key="bt_mode")
     
     c1, c2, c3, c4 = st.columns(4)
-    yesterday = datetime.now().date() - timedelta(days=1)
+    today = datetime.now().date()
+    yesterday = today - timedelta(days=1)
     default_start_time = yesterday - timedelta(days=7)
-    with c1: start_date = st.date_input("Start Date", default_start_time, max_value=yesterday, key="bt_sd")
-    with c2: end_date = st.date_input("End Date", yesterday, max_value=yesterday, key="bt_ed")
+    with c1: start_date = st.date_input("Start Date", default_start_time, key="bt_sd")
+    with c2: end_date = st.date_input("End Date", yesterday, key="bt_ed")
     with c3: resolution = st.selectbox("Resolution", ["1m", "3m", "5m", "15m", "1h"], index=0, key="bt_res")
     with c4: cost = st.number_input("Cost (%)", min_value=0.0, value=0.06, step=0.01, key="bt_cost")
+    
+    # Smart end timestamp: if end_date is today, use midnight (00:00) to avoid fetching incomplete data
+    start_ts = int(datetime.combine(start_date, datetime.min.time()).timestamp())
+    if end_date >= today:
+        end_ts = int(datetime.combine(today, datetime.min.time()).timestamp())  # Today 00:00:00
+        st.caption("ℹ️ End date capped to today 00:00 to use cached data only.")
+    else:
+        end_ts = int(datetime.combine(end_date, datetime.max.time()).timestamp())  # Full day
     
     if bt_mode == "🚀 Batch Comparison":
         # Multi-coin batch mode
@@ -143,9 +152,6 @@ def safe_backtesting_section(inputs, backend_api_client):
             if not selected_pairs:
                 st.warning("Please select at least one trading pair.")
                 return None
-            
-            start_ts = int(datetime.combine(start_date, datetime.min.time()).timestamp())
-            end_ts = int(datetime.combine(end_date, datetime.max.time()).timestamp())
             
             batch_configs = []
             for pair in selected_pairs:
@@ -212,8 +218,6 @@ def safe_backtesting_section(inputs, backend_api_client):
         # Original single-coin mode
         run_bt = st.button("Run Backtesting", key="bt_run")
         if run_bt:
-            start_ts = int(datetime.combine(start_date, datetime.min.time()).timestamp())
-            end_ts = int(datetime.combine(end_date, datetime.max.time()).timestamp())
             with st.spinner("Executing simulation on backend..."):
                 try:
                     results = backend_api_client.backtesting.run_backtesting(
