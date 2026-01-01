@@ -124,44 +124,73 @@ if sync_top10:
     semaphore = asyncio.Semaphore(3)
 
     async def sync_single_coin(session: aiohttp.ClientSession, pair: str):
-        """Sync a single coin async with live status updates."""
+        """Sync a single coin async with live status updates using Chunked Requests."""
         try:
             # Wait for slot
             async with semaphore:
-                # 1. Update status to SYNCING immediately when slot obtained
-                coin_status[pair]["status"] = "🔄 Syncing..."
+                coin_status[pair]["status"] = "🚀 Starting..."
                 update_display()
                 
-                payload = {
-                    "start_time": int(start_datetime.timestamp()),
-                    "end_time": int(end_datetime.timestamp()),
-                    "backtesting_resolution": interval,
-                    "trade_cost": 0.0006,
-                    "config": {
-                        "controller_name": "Generic",
-                        "connector_name": connector,
-                        "trading_pair": pair,
-                        "candles_config": []
+                total_start = int(start_datetime.timestamp())
+                total_end = int(end_datetime.timestamp())
+                total_duration = total_end - total_start
+                
+                # Chunk size: 30 days (in seconds)
+                CHUNK_SIZE = 30 * 24 * 3600
+                
+                current_start = total_start
+                chunks_processed = 0
+                
+                api_endpoint = f"{api_url}/backtesting/candles/sync"
+                last_rows = 0
+                
+                while current_start < total_end:
+                    current_end = min(current_start + CHUNK_SIZE, total_end)
+                    
+                    # Update status with percentage
+                    progress_pct = min(100, int((current_start - total_start) / total_duration * 100))
+                    coin_status[pair]["status"] = f"🔄 Syncing {progress_pct}%"
+                    update_display()
+                    
+                    payload = {
+                        "start_time": current_start,
+                        "end_time": current_end,
+                        "backtesting_resolution": interval,
+                        "trade_cost": 0.0006,
+                        "config": {
+                            "controller_name": "Generic",
+                            "connector_name": connector,
+                            "trading_pair": pair,
+                            "candles_config": []
+                        }
                     }
-                }
-                
-                url = f"{api_url}/backtesting/candles/sync"
-                
-                # 2. Perform Request
-                async with session.post(url, json=payload, timeout=600) as response:
-                    if response.status == 200:
-                        result = await response.json()
-                        if result.get("status") == "success":
-                            rows = result.get("rows", 0)
-                            coin_status[pair]["status"] = "✅ Done"
-                            coin_status[pair]["rows"] = f"{rows:,}"
+                    
+                    async with session.post(api_endpoint, json=payload, timeout=600) as response:
+                        if response.status == 200:
+                            result = await response.json()
+                            if result.get("status") == "success":
+                                # Accumulate rows (just taking the last report for now as it reads the growing file)
+                                last_rows = result.get("rows", 0)
+                                coin_status[pair]["rows"] = f"{last_rows:,}"
+                            else:
+                                short_err = str(result.get('error', 'Error'))[:30]
+                                coin_status[pair]["status"] = f"❌ Error: {short_err}"
+                                update_display()
+                                return  # Stop processing chunks for this coin
                         else:
-                            short_err = str(result.get('error', 'Error'))[:30]
-                            coin_status[pair]["status"] = f"❌ {short_err}"
-                    else:
-                        coin_status[pair]["status"] = f"❌ HTTP {response.status}"
+                            coin_status[pair]["status"] = f"❌ HTTP {response.status}"
+                            update_display()
+                            return
+                    
+                    # Move to next chunk
+                    current_start = current_end
+                    chunks_processed += 1
                 
-                # 3. Update Progress (Wait finished)
+                # Done
+                coin_status[pair]["status"] = "✅ Done"
+                coin_status[pair]["rows"] = f"{last_rows:,}"
+                
+                # Global progress
                 progress_tracker[0] += 1
                 progress_bar.progress(progress_tracker[0] / total, text=f"Completed {progress_tracker[0]}/{total} coins")
                 update_display()
