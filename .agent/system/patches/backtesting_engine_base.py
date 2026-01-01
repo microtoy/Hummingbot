@@ -140,9 +140,10 @@ class BacktestingEngineBase:
             await self._get_candles_with_cache(config)
 
     async def _get_candles_with_cache(self, config: CandlesConfig):
-        """Helper to get candles with robust cumulative caching."""
+        """Helper to get candles with greedy delta-filling and cumulative caching."""
         import hummingbot
         from hummingbot.data_feed.candles_feed.candles_base import CandlesBase
+        from hummingbot.data_feed.candles_feed.data_types import HistoricalCandlesConfig
 
         cache_dir = Path(hummingbot.data_path()) / "candles"
         cache_dir.mkdir(parents=True, exist_ok=True)
@@ -163,50 +164,71 @@ class BacktestingEngineBase:
                     min_ts = int(full_df["timestamp"].min())
                     max_ts = int(full_df["timestamp"].max())
                     
-                    # 1. TOLERANT HIT CHECK
-                    # End time tolerance: if user asks for 'now' but we only have up to 1h ago, it's often fine.
-                    # Or if the gap is very small (e.g. 1 minute drift).
-                    start_covered = (min_ts <= needed_start)
-                    # Allow 3600s (1h) of gap at the end to avoid constant redownloads for 'live-edge' backtests
-                    end_covered = (max_ts >= needed_end - 3600)
-                    
-                    if start_covered and end_covered:
-                        print(f"✅ [CACHE HIT] {filename} covers {min_ts} to {max_ts} (Need {needed_start} to {needed_end})")
+                    # 1. PERFECT HIT CHECK (with small tolerance)
+                    if min_ts <= needed_start and max_ts >= needed_end - 60:
+                        print(f"✅ [CACHE HIT] Using local {filename}")
                         result_df = full_df[(full_df["timestamp"] >= needed_start) & (full_df["timestamp"] <= needed_end)].copy()
                         key = self.backtesting_data_provider._generate_candle_feed_key(config)
                         self.backtesting_data_provider.candles_feeds[key] = result_df
                         return result_df
                     else:
-                        reason = "START missing" if not start_covered else "END missing"
-                        print(f"🔄 [CACHE PARTIAL] {filename} ({min_ts}-{max_ts}) vs Target ({needed_start}-{needed_end}). Reason: {reason}")
+                        print(f"🔄 [CACHE PARTIAL] Local ({min_ts}-{max_ts}) vs Target ({needed_start}-{needed_end})")
             except Exception as e:
                 print(f"⚠️ [CACHE LOAD ERROR] {e}")
 
-        # 2. DOWNLOAD & MERGE
-        print(f"📥 [DOWNLOADING] Fetching delta for {config.trading_pair} {config.interval}...")
-        new_df = await self.backtesting_data_provider.get_candles_feed(config)
+        # 2. GREEDY DELTA FILLING
+        # Instead of redownloading everything, let's see what we actually need
+        download_needed = True
+        merged_df = full_df
         
-        if new_df is not None and not new_df.empty:
-            if not full_df.empty:
-                full_df = pd.concat([full_df, new_df])
-                full_df.drop_duplicates(subset=["timestamp"], inplace=True)
-                full_df.sort_values("timestamp", inplace=True)
-            else:
-                full_df = new_df
-                
+        # If we have some data, try to fetch only what's missing
+        if not merged_df.empty:
+            min_ts = int(merged_df["timestamp"].min())
+            max_ts = int(merged_df["timestamp"].max())
+            
+            # Case A: Missing start (Buffer)
+            if min_ts > needed_start:
+                print(f"📥 [DELTA START] Fetching missing prefix: {needed_start} to {min_ts}")
+                candle_feed = hummingbot.data_feed.candles_feed.candles_factory.CandlesFactory.get_candle(config)
+                prefix_df = await candle_feed.get_historical_candles(config=HistoricalCandlesConfig(
+                    connector_name=config.connector, trading_pair=config.trading_pair,
+                    interval=config.interval, start_time=needed_start, end_time=min_ts
+                ))
+                if prefix_df is not None and not prefix_df.empty:
+                    merged_df = pd.concat([merged_df, prefix_df]).drop_duplicates(subset=["timestamp"]).sort_values("timestamp")
+            
+            # Case B: Missing end
+            if max_ts < needed_end - 60:
+                print(f"📥 [DELTA END] Fetching missing suffix: {max_ts} to {needed_end}")
+                candle_feed = hummingbot.data_feed.candles_feed.candles_factory.CandlesFactory.get_candle(config)
+                suffix_df = await candle_feed.get_historical_candles(config=HistoricalCandlesConfig(
+                    connector_name=config.connector, trading_pair=config.trading_pair,
+                    interval=config.interval, start_time=max_ts, end_time=needed_end
+                ))
+                if suffix_df is not None and not suffix_df.empty:
+                    merged_df = pd.concat([merged_df, suffix_df]).drop_duplicates(subset=["timestamp"]).sort_values("timestamp")
+            
+            download_needed = False # Handled manually via deltas
+
+        if download_needed:
+            # Full download fallback if no local data exists
+            print(f"📥 [FULL DOWNLOAD] No usable cache for {config.trading_pair}. Downloading full range...")
+            merged_df = await self.backtesting_data_provider.get_candles_feed(config)
+
+        if merged_df is not None and not merged_df.empty:
             try:
-                full_df.to_csv(cache_file, index=False)
-                print(f"💾 [CACHE UPDATED] {filename} grew to {len(full_df)} rows")
+                merged_df.to_csv(cache_file, index=False)
+                print(f"💾 [CACHE SAVED] {filename} is now {len(merged_df)} rows")
             except Exception as e:
                 print(f"❌ [SAVE FAILED] {e}")
             
-            # Return final sliced result
-            result_df = full_df[(full_df["timestamp"] >= needed_start) & (full_df["timestamp"] <= needed_end)].copy()
+            # Return sliced result
+            result_df = merged_df[(merged_df["timestamp"] >= needed_start) & (merged_df["timestamp"] <= needed_end)].copy()
             key = self.backtesting_data_provider._generate_candle_feed_key(config)
             self.backtesting_data_provider.candles_feeds[key] = result_df
             return result_df
         
-        return new_df
+        return merged_df
 
     async def simulate_execution(self, trade_cost: float) -> list:
         """
