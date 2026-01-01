@@ -48,7 +48,7 @@ class PatchedBacktestingRouter(BacktestingRouter):
         return await self._post("/backtesting/candles/batch-sync", json=batch_configs)
 
 class PatchedMarketDataRouter(MarketDataRouter):
-    """Extended MarketDataRouter with increased timeout for historical candles."""
+    """Extended MarketDataRouter with POST method for historical candles."""
     
     async def get_historical_candles(
         self,
@@ -58,17 +58,15 @@ class PatchedMarketDataRouter(MarketDataRouter):
         start_time: Optional[int] = None,
         end_time: Optional[int] = None
     ) -> List[Dict[str, Any]]:
-        """Get historical candles with a generous timeout."""
-        params = {
+        """Get historical candles using POST method (original API only supports POST)."""
+        payload = {
             "connector_name": connector_name,
             "trading_pair": trading_pair,
             "interval": interval,
             "start_time": start_time,
             "end_time": end_time
         }
-        # Explicitly use a long timeout for this specific call if needed, 
-        # though the session timeout should handle it now.
-        return await self._get("/market-data/historical-candles", params=params)
+        return await self._post("/market-data/historical-candles", json=payload)
 
 
 class HummingbotAPIClient:
