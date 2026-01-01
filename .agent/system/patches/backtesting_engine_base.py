@@ -169,7 +169,7 @@ class BacktestingEngineBase:
         key = f"{self.controller.config.connector_name}_{self.controller.config.trading_pair}"
         self.controller.market_data_provider.prices = {key: Decimal(row["close_bt"])}
         self.controller.market_data_provider._time = row["timestamp"]
-        self.controller.processed_data.update(row.to_dict())
+        self.controller.processed_data.update(row)
         self.update_executors_info(row["timestamp"])
 
     def update_executors_info(self, timestamp: float):
@@ -386,3 +386,4 @@ class BacktestingEngineBase:
             "win_signals": 0,
             "loss_signals": 0,
         }
+ 
