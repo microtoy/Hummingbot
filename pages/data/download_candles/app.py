@@ -33,7 +33,7 @@ TOP_10_PAIRS = ["BTC-USDT", "ETH-USDT", "BNB-USDT", "XRP-USDT", "SOL-USDT", "TRX
 c1, c2, c3, c4 = st.columns([2, 2, 2, 1.5])
 with c1:
     connector = st.selectbox("Exchange",
-                             ["binance_perpetual", "binance", "gate_io", "gate_io_perpetual", "kucoin", "ascend_ex"],
+                             ["binance", "binance_perpetual", "gate_io", "gate_io_perpetual", "kucoin", "ascend_ex"],
                              index=0)
     trading_pair = st.text_input("Trading Pair", value="BTC-USDT")
 with c2:
