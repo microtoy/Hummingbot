@@ -77,6 +77,8 @@ async def sync_candles(backtesting_config: BacktestingConfig):
         backtesting_engine.controller = SimpleNamespace(config=controller_config)
         backtesting_engine.backtesting_resolution = interval
         
+        # Allow download for sync operation
+        backtesting_engine.allow_download = True
         await backtesting_engine.initialize_backtesting_data_provider()
         
         # 4. Get row count from cache file
@@ -138,6 +140,8 @@ async def batch_sync_candles(batch_configs: list[BacktestingConfig]):
                 engine.controller = SimpleNamespace(config=controller_config)
                 engine.backtesting_resolution = interval
                 
+                # Allow download for sync operation
+                engine.allow_download = True
                 await engine.initialize_backtesting_data_provider()
                 
                 # Get row count
