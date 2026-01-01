@@ -169,49 +169,44 @@ def safe_backtesting_section(inputs, backend_api_client):
                 try:
                     response = backend_api_client.backtesting.batch_run(batch_configs)
                     if response and "results" in response:
-                        st.session_state["batch_results"] = response["results"]
+                        results = response["results"]
                         status.update(label="✅ Batch Complete!", state="complete")
+                        
+                        # Display results INSIDE the status container
+                        df = pd.DataFrame(results)
+                        df_sorted = df.sort_values("net_pnl", ascending=False)
+                        
+                        st.subheader("🏆 Market Leaderboard")
+                        st.dataframe(
+                            df_sorted.style.format({
+                                'net_pnl': '{:.2%}', 'net_pnl_quote': '${:.2f}',
+                                'accuracy': '{:.1%}', 'sharpe_ratio': '{:.2f}',
+                                'profit_factor': '{:.2f}', 'max_drawdown_pct': '{:.2%}'
+                            }),
+                            use_container_width=True, hide_index=True
+                        )
+                        
+                        # Charts
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            fig_pnl = px.bar(df_sorted, x='trading_pair', y='net_pnl', color='net_pnl', color_continuous_scale='RdYlGn', title="Net PnL % by Token")
+                            fig_pnl.update_layout(template="plotly_dark")
+                            st.plotly_chart(fig_pnl, use_container_width=True)
+                        with col2:
+                            fig_scatter = px.scatter(df_sorted, x='accuracy', y='sharpe_ratio', size='total_positions', color='net_pnl', hover_name='trading_pair', title="Risk/Reward Map")
+                            fig_scatter.update_layout(template="plotly_dark")
+                            st.plotly_chart(fig_scatter, use_container_width=True)
+                        
+                        # Summary
+                        s1, s2, s3, s4 = st.columns(4)
+                        s1.metric("Avg PnL %", f"{df['net_pnl'].mean():.2%}")
+                        s2.metric("Total PnL $", f"${df['net_pnl_quote'].sum():,.2f}")
+                        s3.metric("Market Win Rate", f"{(df['net_pnl'] > 0).mean():.1%}")
+                        s4.metric("Best Performer", df_sorted.iloc[0]['trading_pair'])
                     else:
                         st.error("Backend returned empty or error.")
                 except Exception as e:
                     st.error(f"Execution Error: {e}")
-        
-        # Display results if available in session_state
-        if "batch_results" in st.session_state and st.session_state["batch_results"]:
-            results = st.session_state["batch_results"]
-            df = pd.DataFrame(results)
-            
-            st.divider()
-            st.subheader("🏆 Market Leaderboard")
-            
-            df_sorted = df.sort_values("net_pnl", ascending=False)
-            
-            st.dataframe(
-                df_sorted.style.format({
-                    'net_pnl': '{:.2%}', 'net_pnl_quote': '${:.2f}',
-                    'accuracy': '{:.1%}', 'sharpe_ratio': '{:.2f}',
-                    'profit_factor': '{:.2f}', 'max_drawdown_pct': '{:.2%}'
-                }),
-                use_container_width=True, hide_index=True
-            )
-            
-            # Charts
-            col1, col2 = st.columns(2)
-            with col1:
-                fig_pnl = px.bar(df_sorted, x='trading_pair', y='net_pnl', color='net_pnl', color_continuous_scale='RdYlGn', title="Net PnL % by Token")
-                fig_pnl.update_layout(template="plotly_dark")
-                st.plotly_chart(fig_pnl, use_container_width=True)
-            with col2:
-                fig_scatter = px.scatter(df_sorted, x='accuracy', y='sharpe_ratio', size='total_positions', color='net_pnl', hover_name='trading_pair', title="Risk/Reward Map")
-                fig_scatter.update_layout(template="plotly_dark")
-                st.plotly_chart(fig_scatter, use_container_width=True)
-            
-            # Summary
-            s1, s2, s3, s4 = st.columns(4)
-            s1.metric("Avg PnL %", f"{df['net_pnl'].mean():.2%}")
-            s2.metric("Total PnL $", f"${df['net_pnl_quote'].sum():,.2f}")
-            s3.metric("Market Win Rate", f"{(df['net_pnl'] > 0).mean():.1%}")
-            s4.metric("Best Performer", df_sorted.iloc[0]['trading_pair'])
         
         return None
     else:
