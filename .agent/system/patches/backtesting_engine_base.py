@@ -146,7 +146,7 @@ class BacktestingEngineBase:
         cache_dir.mkdir(parents=True, exist_ok=True)
         
         # Generate a unique hash for this specific request
-        cache_key = f"{config.connector}_{config.trading_pair}_{config.interval}_{self.start_time}_{self.end_time}"
+        cache_key = f"{config.connector}_{config.trading_pair}_{config.interval}_{self.backtesting_data_provider.start_time}_{self.backtesting_data_provider.end_time}"
         cache_hash = hashlib.md5(cache_key.encode()).hexdigest()
         cache_file = cache_dir / f"{cache_hash}.csv"
         
