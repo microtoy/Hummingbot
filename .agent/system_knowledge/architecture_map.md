@@ -30,6 +30,8 @@ We established a mechanism where files in the `custom_strategies/` directory are
   - *Persistence*: The patched file is stored in `.agent/system/patches/` and mounted back into the container via `docker-compose.yml`.
 - **Pandas SettingWithCopyWarning**: Modifying candle slices in `update_processed_data` caused warnings and log noise.
   - *Fix*: Use `.copy()` on dataframes returned by `market_data_provider`.
+- **Pydantic "Extra inputs are not permitted"**: Subclass fields (like `use_compounding`) were rejected due to parent class `extra='forbid'`.
+  - *Fix*: Explicitly set `model_config = ConfigDict(extra='allow')` in the custom strategy Config class.
 
 ## Performance Note
 For MA Cross and Directional strategies, ensure `update_processed_data` calculates a full time-series `signal` column in the `features` dataframe for the backtesting engine to process history.

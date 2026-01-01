@@ -86,9 +86,9 @@ def extract_controller_info(content: str) -> Dict[str, Any]:
                             if attr_name in ["controller_name", "candles_config", "markets"]:
                                 continue
                             
-                            value = extract_value(item.value) if item.value else None
-                            if value is not None or attr_name != "Unknown":
-                                info["parameters"][attr_name] = value or ""
+                            value = extract_value(item.value) if item.value is not None else None
+                            if value is not None:
+                                info["parameters"][attr_name] = value
                     break
     except:
         pass
