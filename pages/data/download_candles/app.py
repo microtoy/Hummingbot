@@ -123,7 +123,7 @@ if sync_top10:
     # Semaphore for concurrency
     semaphore = asyncio.Semaphore(3)
 
-    async def sync_single_coin(session: aiohttp.ClientSession, pair: str):
+    async def sync_single_coin(session: aiohttp.ClientSession, pair: str, connector: str, interval: str):
         """Sync a single coin async with live status updates using Chunked Requests."""
         try:
             # Wait for slot
@@ -206,7 +206,7 @@ if sync_top10:
     async def run_parallel_sync():
         timeout = aiohttp.ClientTimeout(total=600)
         async with aiohttp.ClientSession(auth=api_auth, timeout=timeout) as session:
-            tasks = [sync_single_coin(session, pair) for pair in TOP_10_PAIRS]
+            tasks = [sync_single_coin(session, pair, connector, interval) for pair in TOP_10_PAIRS]
             await asyncio.gather(*tasks)
 
     # Run the async loop
