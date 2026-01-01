@@ -8,7 +8,7 @@ from hummingbot.strategy_v2.controllers.directional_trading_controller_base impo
     DirectionalTradingControllerBase,
     DirectionalTradingControllerConfigBase,
 )
-from hummingbot.strategy_v2.executors.position_executor.data_types import PositionExecutorConfig, TripleBarrierConfig
+from hummingbot.strategy_v2.executors.position_executor.data_types import PositionExecutorConfig
 
 
 class MACrossStrategyConfig(DirectionalTradingControllerConfigBase):
@@ -21,12 +21,12 @@ class MACrossStrategyConfig(DirectionalTradingControllerConfigBase):
     fast_ma: int = Field(default=20, description="Fast MA period")
     slow_ma: int = Field(default=50, description="Slow MA period")
     
-    # Standard directional fields
+    # Standard directional fields (overriding defaults if needed)
     connector_name: str = Field(default="binance", description="The connector to use")
     trading_pair: str = Field(default="BTC-USDT", description="The trading pair to trade")
     total_amount_quote: Decimal = Field(default=Decimal("100"), description="Total amount in quote")
     
-    # Risk Management (Triple Barrier)
+    # Risk Management (Triple Barrier) - These override base class fields
     stop_loss: Optional[Decimal] = Field(default=Decimal("0.02"), description="Stop loss threshold (e.g., 0.02 for 2%)")
     take_profit: Optional[Decimal] = Field(default=Decimal("0.05"), description="Take profit threshold (e.g., 0.05 for 5%)")
     time_limit: Optional[int] = Field(default=21600, description="Time limit in seconds (e.g., 21600 for 6h)")
@@ -41,22 +41,19 @@ class MACrossStrategyConfig(DirectionalTradingControllerConfigBase):
 
 class MACrossStrategyController(DirectionalTradingControllerBase):
     """
-    Implementation of an MA Cross controller that calculates signals and uses Triple Barrier.
+    Implementation of an MA Cross controller that calculates signals.
+    The base class DirectionalTradingControllerBase handles the Triple Barrier logic
+    automatically using the fields defined in the Config.
     """
     def __init__(self, config: MACrossStrategyConfig, *args, **kwargs):
         # Add the required candles config if not present
         if not config.candles_config:
-            # Default to 1h candles, but this will be overridden if user selects a different Resolution in UI
             config.candles_config = [
                 CandlesConfig(connector=config.connector_name, trading_pair=config.trading_pair, interval="1h", max_records=500)
             ]
         
-        # Build the TripleBarrierConfig from individual parameters
-        config.triple_barrier_config = TripleBarrierConfig(
-            stop_loss=config.stop_loss,
-            take_profit=config.take_profit,
-            time_limit=config.time_limit
-        )
+        # NOTE: Do NOT set config.triple_barrier_config manually.
+        # It is a property in the base class that is computed from stop_loss, take_profit, and time_limit.
         
         super().__init__(config, *args, **kwargs)
         self.config = config
@@ -67,7 +64,7 @@ class MACrossStrategyController(DirectionalTradingControllerBase):
         """
         # Use the first candles config interval
         interval = self.config.candles_config[0].interval if self.config.candles_config else "1h"
-        # Always use .copy() to avoid SettingWithCopyWarning
+        # Use .copy() to avoid SettingWithCopyWarning
         candles = self.market_data_provider.get_candles_df(self.config.connector_name, self.config.trading_pair, interval).copy()
         
         if len(candles) < self.config.slow_ma:
@@ -75,7 +72,7 @@ class MACrossStrategyController(DirectionalTradingControllerBase):
             self.processed_data = {"signal": 0, "features": candles}
             return
 
-        # Time-series calculation
+        # Time-series calculation for backtesting engine
         candles["fast_ma"] = candles["close"].rolling(window=self.config.fast_ma).mean()
         candles["slow_ma"] = candles["close"].rolling(window=self.config.slow_ma).mean()
         
