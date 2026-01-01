@@ -60,7 +60,10 @@ class MACrossStrategyController(DirectionalTradingControllerBase):
     async def update_processed_data(self):
         """
         Calculates MAs and determines signal for the whole dataset.
+        IMPORTANT: Shifts timestamps to avoid Look-Ahead Bias.
         """
+        from hummingbot.data_feed.candles_feed.candles_base import CandlesBase
+        
         interval = self.config.candles_config[0].interval if self.config.candles_config else "1h"
         candles = self.market_data_provider.get_candles_df(self.config.connector_name, self.config.trading_pair, interval).copy()
         
@@ -68,6 +71,15 @@ class MACrossStrategyController(DirectionalTradingControllerBase):
             candles["signal"] = 0
             self.processed_data = {"signal": 0, "features": candles}
             return
+
+        # --------------------------------------------------------------------------
+        # [CRITICAL AUDIT FIX] Timestamp Safety Shift
+        # Original: Timestamp 13:00 means "Open Time".
+        # Problem: Backtesting at 13:01 would merge with 13:00 and see the 13:59 close price.
+        # Fix: Shift timestamp by interval so 13:00 Open Time becomes 14:00 Available Time.
+        # --------------------------------------------------------------------------
+        shift_seconds = CandlesBase.interval_to_seconds[interval]
+        candles["timestamp"] = candles["timestamp"] + shift_seconds
 
         candles["fast_ma"] = candles["close"].rolling(window=self.config.fast_ma).mean()
         candles["slow_ma"] = candles["close"].rolling(window=self.config.slow_ma).mean()
