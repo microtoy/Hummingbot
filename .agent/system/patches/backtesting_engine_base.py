@@ -163,80 +163,33 @@ class BacktestingEngineBase:
         # We use a 60s buffer from "now" to ensure the latest candle is likely closed.
         effective_needed_end = min(needed_end, current_ts - 60)
         
-        full_df = pd.DataFrame()
-        if cache_file.exists():
-            try:
-                full_df = pd.read_csv(cache_file)
-                if not full_df.empty:
-                    min_ts = int(full_df["timestamp"].min())
-                    max_ts = int(full_df["timestamp"].max())
-                    
-                    # 1. PERFECT HIT CHECK (with generous 24-hour tolerance for the end)
-                    # If we have data up to at least (requested_end - 24h), we consider it a hit for "live" tests.
-                    # This prevents constant small redownloads when testing near the current date.
-                    if min_ts <= needed_start and max_ts >= effective_needed_end - 86400:
-                        print(f"✅ [CACHE HIT] Using local {filename} (Max TS: {max_ts}, Needed: {effective_needed_end})")
-                        result_df = full_df[(full_df["timestamp"] >= needed_start) & (full_df["timestamp"] <= needed_end)].copy()
-                        key = self.backtesting_data_provider._generate_candle_feed_key(config)
-                        self.backtesting_data_provider.candles_feeds[key] = result_df
-                        return result_df
-                    else:
-                        print(f"🔄 [CACHE PARTIAL] Local ({min_ts}-{max_ts}) vs Effective Target ({needed_start}-{effective_needed_end})")
-            except Exception as e:
-                print(f"⚠️ [CACHE LOAD ERROR] {e}")
-
-        # 2. GREEDY DELTA FILLING
-        download_needed = True
-        merged_df = full_df
+        # CACHE-ONLY MODE: Never request from network, only use local cache
+        if not cache_file.exists():
+            raise ValueError(f"❌ [NO CACHE] {filename} does not exist. Please sync data first via 'Download Candles' page.")
         
-        if not merged_df.empty:
-            min_ts = int(merged_df["timestamp"].min())
-            max_ts = int(merged_df["timestamp"].max())
-            
-            # Case A: Missing start (Buffer)
-            if min_ts > needed_start:
-                print(f"📥 [DELTA START] Fetching missing prefix: {needed_start} to {min_ts}")
-                candle_feed = hummingbot.data_feed.candles_feed.candles_factory.CandlesFactory.get_candle(config)
-                prefix_df = await candle_feed.get_historical_candles(config=HistoricalCandlesConfig(
-                    connector_name=config.connector, trading_pair=config.trading_pair,
-                    interval=config.interval, start_time=needed_start, end_time=min_ts
-                ))
-                if prefix_df is not None and not prefix_df.empty:
-                    merged_df = pd.concat([merged_df, prefix_df]).drop_duplicates(subset=["timestamp"]).sort_values("timestamp")
-            
-            # Case B: Missing end (but not beyond "now")
-            if max_ts < effective_needed_end - 300:
-                print(f"📥 [DELTA END] Fetching missing suffix: {max_ts} to {effective_needed_end}")
-                candle_feed = hummingbot.data_feed.candles_feed.candles_factory.CandlesFactory.get_candle(config)
-                suffix_df = await candle_feed.get_historical_candles(config=HistoricalCandlesConfig(
-                    connector_name=config.connector, trading_pair=config.trading_pair,
-                    interval=config.interval, start_time=max_ts, end_time=effective_needed_end
-                ))
-                if suffix_df is not None and not suffix_df.empty:
-                    merged_df = pd.concat([merged_df, suffix_df]).drop_duplicates(subset=["timestamp"]).sort_values("timestamp")
-            
-            download_needed = False
-
-        if download_needed:
-            print(f"📥 [FULL DOWNLOAD] Fetching range for {config.trading_pair} up to {effective_needed_end}")
-            # Ensure the provider also uses the capped end_time if possible
-            # But the provider might be used elsewhere, so we just use its fetch
-            merged_df = await self.backtesting_data_provider.get_candles_feed(config)
-
-        if merged_df is not None and not merged_df.empty:
-            try:
-                merged_df.to_csv(cache_file, index=False)
-                print(f"💾 [CACHE SAVED] {filename} is now {len(merged_df)} rows")
-            except Exception as e:
-                print(f"❌ [SAVE FAILED] {e}")
-            
-            # Return sliced result
-            result_df = merged_df[(merged_df["timestamp"] >= needed_start) & (merged_df["timestamp"] <= needed_end)].copy()
-            key = self.backtesting_data_provider._generate_candle_feed_key(config)
-            self.backtesting_data_provider.candles_feeds[key] = result_df
-            return result_df
+        try:
+            full_df = pd.read_csv(cache_file)
+        except Exception as e:
+            raise ValueError(f"❌ [CACHE READ ERROR] Failed to read {filename}: {e}")
         
-        return merged_df
+        if full_df.empty:
+            raise ValueError(f"❌ [EMPTY CACHE] {filename} is empty. Please sync data first.")
+        
+        min_ts = int(full_df["timestamp"].min())
+        max_ts = int(full_df["timestamp"].max())
+        
+        # Check if cache covers the needed range (with 24h tolerance for end)
+        if min_ts > needed_start:
+            raise ValueError(f"❌ [CACHE INSUFFICIENT] {filename} starts at {min_ts}, but need {needed_start}. Please sync more historical data.")
+        
+        if max_ts < effective_needed_end - 86400:  # 24h tolerance
+            raise ValueError(f"❌ [CACHE OUTDATED] {filename} ends at {max_ts}, but need {effective_needed_end}. Please sync to update data.")
+        
+        print(f"✅ [CACHE HIT] Using local {filename} ({len(full_df):,} rows, {min_ts}-{max_ts})")
+        result_df = full_df[(full_df["timestamp"] >= needed_start) & (full_df["timestamp"] <= needed_end)].copy()
+        key = self.backtesting_data_provider._generate_candle_feed_key(config)
+        self.backtesting_data_provider.candles_feeds[key] = result_df
+        return result_df
 
     async def simulate_execution(self, trade_cost: float) -> list:
         """
