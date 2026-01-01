@@ -161,7 +161,7 @@ def safe_backtesting_section(inputs, backend_api_client):
             
             with st.status(f"Running {len(selected_pairs)} parallel backtests...", expanded=True) as status:
                 try:
-                    response = backend_api_client._post("/backtesting/batch-run", json=batch_configs)
+                    response = backend_api_client.backtesting.batch_run(batch_configs)
                     if response and "results" in response:
                         results = response["results"]
                         status.update(label="✅ Batch Complete!", state="complete")
