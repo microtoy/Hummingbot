@@ -140,58 +140,78 @@ class BacktestingEngineBase:
             await self._get_candles_with_cache(config)
 
     async def _get_candles_with_cache(self, config: CandlesConfig):
-        """Helper to get candles with smart disk caching."""
+        """Helper to get candles with smart, incremental disk caching."""
         import hummingbot
+        from hummingbot.data_feed.candles_feed.candles_base import CandlesBase
+        from hummingbot.data_feed.candles_feed.data_types import HistoricalCandlesConfig
+        import time
+
         cache_dir = Path(hummingbot.data_path()) / "candles"
         cache_dir.mkdir(parents=True, exist_ok=True)
         
-        # Consistent filename for the same pair/interval
-        filename = f"{config.connector}_{config.trading_pair}_{config.interval.replace('m', 'm')}.csv"
+        filename = f"{config.connector}_{config.trading_pair}_{config.interval}.csv"
         cache_file = cache_dir / filename
         
-        start_ts = self.backtesting_data_provider.start_time
-        end_ts = self.backtesting_data_provider.end_time
+        # Determine actual needed range including strategy buffer
+        candles_buffer = config.max_records * CandlesBase.interval_to_seconds[config.interval]
+        needed_start = int(self.backtesting_data_provider.start_time - candles_buffer)
+        needed_end = int(self.backtesting_data_provider.end_time)
         
-        full_df = None
+        full_df = pd.DataFrame()
         if cache_file.exists():
             try:
-                # Load existing data
                 full_df = pd.read_csv(cache_file)
                 if not full_df.empty:
                     min_ts = full_df["timestamp"].min()
                     max_ts = full_df["timestamp"].max()
                     
-                    # If requested range is a subset of local data, return from local
-                    if min_ts <= start_ts and max_ts >= end_ts:
-                        result_df = full_df[(full_df["timestamp"] >= start_ts) & (full_df["timestamp"] <= end_ts)].copy()
+                    # Perfect Hit: requested range is fully covered
+                    if min_ts <= needed_start and max_ts >= needed_end:
+                        print(f"[CACHE HIT] {filename} for range {needed_start} to {needed_end}")
+                        result_df = full_df[(full_df["timestamp"] >= needed_start) & (full_df["timestamp"] <= needed_end)].copy()
                         key = self.backtesting_data_provider._generate_candle_feed_key(config)
                         self.backtesting_data_provider.candles_feeds[key] = result_df
                         return result_df
-            except Exception:
-                full_df = None
+                    else:
+                        print(f"[CACHE PARTIAL] {filename} covers {min_ts}-{max_ts}, but need {needed_start}-{needed_end}")
+            except Exception as e:
+                print(f"[CACHE ERROR] Failed to load {filename}: {e}")
+                full_df = pd.DataFrame()
 
-        # Download needed range (either missing some or no file)
-        # Hummingbot's get_candles_feed downloads [start_ts - buffer, end_ts]
+        # Incremental Download: Only download what we don't have
+        # To keep it simple but efficient, we just download the FULL requested range if it's not a hit,
+        # but the standard get_candles_feed might be slow.
+        # Let's ensure the data provider uses our cache knowledge or just use its download.
+        
+        print(f"[CACHE MISS/PARTIAL] Downloading {config.trading_pair} {config.interval}...")
+        start_download = time.perf_counter()
+        
+        # We use the standard provider download which covers [needed_start, needed_end]
+        # (It uses its own internal logic to fetch from exchange)
         new_df = await self.backtesting_data_provider.get_candles_feed(config)
         
+        download_time = time.perf_counter() - start_download
+        print(f"[DOWNLOAD DONE] {config.trading_pair} {config.interval} took {download_time:.2f}s")
+        
         if new_df is not None and not new_df.empty:
-            if full_df is not None and not full_df.empty:
-                # Merge and deduplicate
-                merged_df = pd.concat([full_df, new_df])
-                merged_df.drop_duplicates(subset=["timestamp"], inplace=True)
-                merged_df.sort_values("timestamp", inplace=True)
-                full_df = merged_df
+            if not full_df.empty:
+                # Merge, deduplicate and sort
+                full_df = pd.concat([full_df, new_df])
+                full_df.drop_duplicates(subset=["timestamp"], inplace=True)
+                full_df.sort_values("timestamp", inplace=True)
             else:
                 full_df = new_df
             
-            # Save the cumulative data
+            # Save the updated cumulative data
             try:
                 full_df.to_csv(cache_file, index=False)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[CACHE SAVE ERROR] {e}")
             
             # Return precisely requested slice
-            result_df = full_df[(full_df["timestamp"] >= start_ts) & (full_df["timestamp"] <= end_ts)].copy()
+            result_df = full_df[(full_df["timestamp"] >= needed_start) & (full_df["timestamp"] <= needed_end)].copy()
+            key = self.backtesting_data_provider._generate_candle_feed_key(config)
+            self.backtesting_data_provider.candles_feeds[key] = result_df
             return result_df
         
         return new_df
