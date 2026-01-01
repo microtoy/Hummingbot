@@ -144,9 +144,17 @@ def safe_backtesting_section(inputs, backend_api_client):
         end_ts = int(datetime.combine(end_date, datetime.max.time()).timestamp())  # Full day
     
     if bt_mode == "🚀 Batch Comparison":
-        # Multi-coin batch mode
-        default_pairs = ["BTC-USDT", "ETH-USDT", "SOL-USDT", "XRP-USDT", "BNB-USDT", "ADA-USDT", "DOT-USDT", "DOGE-USDT", "AVAX-USDT", "MATIC-USDT"]
-        selected_pairs = st.multiselect("Select Trading Pairs to Compare", options=default_pairs, default=default_pairs[:5], key="bt_pairs")
+        # Multi-coin batch mode - Top 20 by market cap (as of 2024)
+        import os
+        cpu_cores = os.cpu_count() or 8
+        top_pairs = [
+            "BTC-USDT", "ETH-USDT", "BNB-USDT", "SOL-USDT", "XRP-USDT",
+            "DOGE-USDT", "ADA-USDT", "AVAX-USDT", "TRX-USDT", "DOT-USDT",
+            "LINK-USDT", "MATIC-USDT", "TON-USDT", "SHIB-USDT", "LTC-USDT",
+            "BCH-USDT", "UNI-USDT", "ATOM-USDT", "XLM-USDT", "ETC-USDT"
+        ]
+        st.caption(f"🖥️ Detected {cpu_cores} CPU cores. Selecting Top {min(cpu_cores, len(top_pairs))} coins by market cap.")
+        selected_pairs = st.multiselect("Select Trading Pairs to Compare", options=top_pairs, default=top_pairs[:min(cpu_cores, len(top_pairs))], key="bt_pairs")
         
         if st.button("🔥 Run Parallel Batch Backtest", key="bt_batch_run", type="primary"):
             if not selected_pairs:
