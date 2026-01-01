@@ -46,7 +46,6 @@ if sync_to_server:
     start_datetime = datetime.combine(start_date, time.min)
     end_datetime = datetime.combine(end_date, time.max)
     with st.spinner("Syncing candles to server cache..."):
-        # Sync the primary interval
         dummy_config = {
             "controller_name": "Generic",
             "connector_name": connector,
@@ -60,7 +59,6 @@ if sync_to_server:
             config=dummy_config
         )
         
-        # Also sync 1h if not already synced, as it's common for indicators
         if interval != "1h":
             backend_api_client.backtesting.sync_candles(
                 start_time=int(start_datetime.timestamp()),
@@ -82,19 +80,50 @@ if get_data_button:
         st.error("End Date should be greater than Start Date.")
         st.stop()
 
-    candles = backend_api_client.market_data.get_historical_candles(
-        connector_name=connector,
-        trading_pair=trading_pair,
-        interval=interval,
-        start_time=int(start_datetime.timestamp()),
-        end_time=int(end_datetime.timestamp())
-    )
-
-    if "error" in candles:
-        st.error(candles["error"])
+    # ======= Chunked Download with Progress Bar =======
+    total_days = (end_date - start_date).days + 1
+    all_candles = []
+    
+    progress_bar = st.progress(0, text="Preparing download...")
+    status_text = st.empty()
+    
+    for i, day_offset in enumerate(range(total_days)):
+        current_day = start_date + timedelta(days=day_offset)
+        chunk_start = datetime.combine(current_day, time.min)
+        chunk_end = datetime.combine(current_day, time.max)
+        
+        # Update progress
+        progress = (i + 1) / total_days
+        progress_bar.progress(progress, text=f"Downloading {current_day.strftime('%Y-%m-%d')}...")
+        status_text.text(f"📥 Fetching day {i+1}/{total_days}: {current_day.strftime('%Y-%m-%d')}")
+        
+        try:
+            chunk = backend_api_client.market_data.get_historical_candles(
+                connector_name=connector,
+                trading_pair=trading_pair,
+                interval=interval,
+                start_time=int(chunk_start.timestamp()),
+                end_time=int(chunk_end.timestamp())
+            )
+            
+            if isinstance(chunk, list) and len(chunk) > 0:
+                all_candles.extend(chunk)
+            elif isinstance(chunk, dict) and "error" in chunk:
+                st.warning(f"⚠️ Day {current_day}: {chunk['error']}")
+        except Exception as e:
+            st.warning(f"⚠️ Failed to fetch {current_day}: {str(e)}")
+            continue
+    
+    progress_bar.progress(1.0, text="Download complete!")
+    status_text.text(f"✅ Downloaded {len(all_candles):,} candles across {total_days} days.")
+    
+    if len(all_candles) == 0:
+        st.error("No data retrieved. Please check your parameters.")
         st.stop()
-
-    candles_df = pd.DataFrame(candles)
+    
+    candles_df = pd.DataFrame(all_candles)
+    candles_df = candles_df.drop_duplicates(subset=["timestamp"], keep="last")
+    candles_df = candles_df.sort_values("timestamp")
     candles_df.index = pd.to_datetime(candles_df["timestamp"], unit='s')
 
     # Plotting the candlestick chart
