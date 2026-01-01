@@ -1,6 +1,8 @@
 import importlib
 import inspect
 import os
+import hashlib
+from pathlib import Path
 from decimal import Decimal
 from typing import Dict, List, Optional, Type, Union
 
@@ -125,14 +127,51 @@ class BacktestingEngineBase:
         }
 
     async def initialize_backtesting_data_provider(self):
+        # Main candle feed
         backtesting_config = CandlesConfig(
             connector=self.controller.config.connector_name,
             trading_pair=self.controller.config.trading_pair,
             interval=self.backtesting_resolution
         )
-        await self.controller.market_data_provider.initialize_candles_feed(backtesting_config)
+        await self._get_candles_with_cache(backtesting_config)
+        
+        # Additional candle feeds (if any)
         for config in self.controller.config.candles_config:
-            await self.controller.market_data_provider.initialize_candles_feed(config)
+            await self._get_candles_with_cache(config)
+
+    async def _get_candles_with_cache(self, config: CandlesConfig):
+        """Helper to get candles with disk caching."""
+        import hummingbot
+        cache_dir = Path(hummingbot.data_path()) / "candles_cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Generate a unique hash for this specific request
+        cache_key = f"{config.connector}_{config.trading_pair}_{config.interval}_{self.start_time}_{self.end_time}"
+        cache_hash = hashlib.md5(cache_key.encode()).hexdigest()
+        cache_file = cache_dir / f"{cache_hash}.csv"
+        
+        if cache_file.exists():
+            try:
+                # Load from disk
+                df = pd.read_csv(cache_file)
+                # Success! Inject into market data provider
+                key = self.backtesting_data_provider._generate_candle_feed_key(config)
+                self.backtesting_data_provider.candles_feeds[key] = df
+                return df
+            except Exception as e:
+                # Fallback to normal download if cache load fails
+                pass
+                
+        # Normal path: download from exchange
+        df = await self.backtesting_data_provider.get_candles_feed(config)
+        
+        # Save to disk for next time
+        if df is not None and not df.empty:
+            try:
+                df.to_csv(cache_file, index=False)
+            except:
+                pass
+        return df
 
     async def simulate_execution(self, trade_cost: float) -> list:
         """
