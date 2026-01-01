@@ -116,40 +116,119 @@ def scan_strategies() -> List[Dict[str, Any]]:
     return strategies
 
 def safe_backtesting_section(inputs, backend_api_client):
-    """Custom safe backtesting section."""
+    """Custom safe backtesting section with single and batch modes."""
     from datetime import datetime, timedelta
+    import pandas as pd
+    import plotly.express as px
+    
     st.write("### Backtesting")
-    c1, c2, c3, c4, c5 = st.columns(5)
+    
+    # Mode selector
+    bt_mode = st.radio("Mode", ["Single Coin", "🚀 Batch Comparison"], horizontal=True, key="bt_mode")
+    
+    c1, c2, c3, c4 = st.columns(4)
     default_end_time = datetime.now().date() - timedelta(days=1)
-    default_start_time = default_end_time - timedelta(days=2)
+    default_start_time = default_end_time - timedelta(days=7)
     with c1: start_date = st.date_input("Start Date", default_start_time, key="bt_sd")
     with c2: end_date = st.date_input("End Date", default_end_time, key="bt_ed")
     with c3: resolution = st.selectbox("Resolution", ["1m", "3m", "5m", "15m", "1h"], index=0, key="bt_res")
     with c4: cost = st.number_input("Cost (%)", min_value=0.0, value=0.06, step=0.01, key="bt_cost")
-    with c5: run_bt = st.button("Run Backtesting", key="bt_run")
-
-    if run_bt:
-        start_ts = int(datetime.combine(start_date, datetime.min.time()).timestamp())
-        end_ts = int(datetime.combine(end_date, datetime.max.time()).timestamp())
-        with st.spinner("Executing simulation on backend..."):
-            try:
-                results = backend_api_client.backtesting.run_backtesting(
-                    start_time=start_ts, end_time=end_ts, backtesting_resolution=resolution,
-                    trade_cost=cost / 100, config=inputs
-                )
-                if not results: return None
-                if "error" in results:
-                    st.error(f"Backend Error: {results['error']}")
-                    return None
-                if "results" in results:
-                    # Normalize results to prevent UI crashes on empty backtests
-                    if isinstance(results["results"].get("close_types"), (int, float)):
-                        results["results"]["close_types"] = {}
-                return results
-            except Exception as e:
-                st.error(f"Connection failed: {e}")
+    
+    if bt_mode == "🚀 Batch Comparison":
+        # Multi-coin batch mode
+        default_pairs = ["BTC-USDT", "ETH-USDT", "SOL-USDT", "XRP-USDT", "BNB-USDT", "ADA-USDT", "DOT-USDT", "DOGE-USDT", "AVAX-USDT", "MATIC-USDT"]
+        selected_pairs = st.multiselect("Select Trading Pairs to Compare", options=default_pairs, default=default_pairs[:5], key="bt_pairs")
+        
+        if st.button("🔥 Run Parallel Batch Backtest", key="bt_batch_run", type="primary"):
+            if not selected_pairs:
+                st.warning("Please select at least one trading pair.")
                 return None
-    return None
+            
+            start_ts = int(datetime.combine(start_date, datetime.min.time()).timestamp())
+            end_ts = int(datetime.combine(end_date, datetime.max.time()).timestamp())
+            
+            batch_configs = []
+            for pair in selected_pairs:
+                cfg = inputs.copy()
+                cfg["trading_pair"] = pair
+                batch_configs.append({
+                    "config": cfg,
+                    "start_time": start_ts,
+                    "end_time": end_ts,
+                    "backtesting_resolution": resolution,
+                    "trade_cost": cost / 100
+                })
+            
+            with st.status(f"Running {len(selected_pairs)} parallel backtests...", expanded=True) as status:
+                try:
+                    response = backend_api_client._post("/backtesting/batch-run", json=batch_configs)
+                    if response and "results" in response:
+                        results = response["results"]
+                        status.update(label="✅ Batch Complete!", state="complete")
+                        
+                        df = pd.DataFrame(results)
+                        st.divider()
+                        st.subheader("🏆 Market Leaderboard")
+                        
+                        sort_col = st.selectbox("Sort by", ["net_pnl", "sharpe_ratio", "accuracy", "profit_factor"], index=0, key="bt_sort")
+                        df_sorted = df.sort_values(sort_col, ascending=False)
+                        
+                        st.dataframe(
+                            df_sorted.style.format({
+                                'net_pnl': '{:.2%}', 'net_pnl_quote': '${:.2f}',
+                                'accuracy': '{:.1%}', 'sharpe_ratio': '{:.2f}',
+                                'profit_factor': '{:.2f}', 'max_drawdown_pct': '{:.2%}'
+                            }).background_gradient(subset=['net_pnl'], cmap='RdYlGn'),
+                            use_container_width=True, hide_index=True
+                        )
+                        
+                        # Charts
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            fig_pnl = px.bar(df_sorted, x='trading_pair', y='net_pnl', color='net_pnl', color_continuous_scale='RdYlGn', title="Net PnL % by Token")
+                            fig_pnl.update_layout(template="plotly_dark")
+                            st.plotly_chart(fig_pnl, use_container_width=True)
+                        with col2:
+                            fig_scatter = px.scatter(df_sorted, x='accuracy', y='sharpe_ratio', size='total_positions', color='net_pnl', hover_name='trading_pair', title="Risk/Reward Map")
+                            fig_scatter.update_layout(template="plotly_dark")
+                            st.plotly_chart(fig_scatter, use_container_width=True)
+                        
+                        # Summary
+                        s1, s2, s3, s4 = st.columns(4)
+                        s1.metric("Avg PnL %", f"{df['net_pnl'].mean():.2%}")
+                        s2.metric("Total PnL $", f"${df['net_pnl_quote'].sum():,.2f}")
+                        s3.metric("Market Win Rate", f"{(df['net_pnl'] > 0).mean():.1%}")
+                        s4.metric("Best Performer", df_sorted.iloc[0]['trading_pair'])
+                        return None # Batch mode doesn't return single result
+                    else:
+                        st.error("Backend returned empty or error.")
+                except Exception as e:
+                    st.error(f"Execution Error: {e}")
+            return None
+    else:
+        # Original single-coin mode
+        run_bt = st.button("Run Backtesting", key="bt_run")
+        if run_bt:
+            start_ts = int(datetime.combine(start_date, datetime.min.time()).timestamp())
+            end_ts = int(datetime.combine(end_date, datetime.max.time()).timestamp())
+            with st.spinner("Executing simulation on backend..."):
+                try:
+                    results = backend_api_client.backtesting.run_backtesting(
+                        start_time=start_ts, end_time=end_ts, backtesting_resolution=resolution,
+                        trade_cost=cost / 100, config=inputs
+                    )
+                    if not results: return None
+                    if "error" in results:
+                        st.error(f"Backend Error: {results['error']}")
+                        return None
+                    if "results" in results:
+                        if isinstance(results["results"].get("close_types"), (int, float)):
+                            results["results"]["close_types"] = {}
+                    return results
+                except Exception as e:
+                    st.error(f"Connection failed: {e}")
+                    return None
+        return None
 
 # --- UI START ---
 st.text("Create, test and deploy your custom V2 Controllers.")
