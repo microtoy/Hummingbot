@@ -183,11 +183,16 @@ def sync_run_backtest(config_dict: dict):
         )
         
         # Simplify results for batch transport
+        summary = results["results"]
         return {
             "trading_pair": controller_config.trading_pair,
-            "net_pnl_quote": results["results"]["net_pnl_quote"],
-            "sharpe_ratio": results["results"].get("sharpe_ratio", 0) or 0,
-            "trades": results["results"]["total_executors"],
+            "net_pnl": summary.get("net_pnl", 0),
+            "net_pnl_quote": summary.get("net_pnl_quote", 0),
+            "accuracy": summary.get("accuracy", 0),
+            "sharpe_ratio": summary.get("sharpe_ratio", 0),
+            "max_drawdown_pct": summary.get("max_drawdown_pct", 0),
+            "profit_factor": summary.get("profit_factor", 0),
+            "total_positions": summary.get("total_positions", 0),
             "performance": results.get("performance", {})
         }
         

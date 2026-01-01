@@ -40,6 +40,30 @@ class PatchedBacktestingRouter(BacktestingRouter):
         return await self._post("/backtesting/candles/sync", json=payload)
 
 
+class PatchedMarketDataRouter(MarketDataRouter):
+    """Extended MarketDataRouter with increased timeout for historical candles."""
+    
+    async def get_historical_candles(
+        self,
+        connector_name: str,
+        trading_pair: str,
+        interval: str = "1m",
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        """Get historical candles with a generous timeout."""
+        params = {
+            "connector_name": connector_name,
+            "trading_pair": trading_pair,
+            "interval": interval,
+            "start_time": start_time,
+            "end_time": end_time
+        }
+        # Explicitly use a long timeout for this specific call if needed, 
+        # though the session timeout should handle it now.
+        return await self._get("/market-data/historical-candles", params=params)
+
+
 class HummingbotAPIClient:
     def __init__(
         self, 
@@ -51,7 +75,8 @@ class HummingbotAPIClient:
         self.base_url = base_url.rstrip('/')
         self.auth = aiohttp.BasicAuth(username, password)
         # Increase default timeout for operations like historical candles
-        self.timeout = timeout or aiohttp.ClientTimeout(total=300)  # 5 minutes
+        # 30 minutes (1800s) should be plenty for 1 year of 1m data
+        self.timeout = timeout or aiohttp.ClientTimeout(total=1800)
         self._session: Optional[aiohttp.ClientSession] = None
         self._accounts: Optional[AccountsRouter] = None
         self._archived_bots: Optional[ArchivedBotsRouter] = None
@@ -70,8 +95,11 @@ class HummingbotAPIClient:
         if self._session is None:
             # FIX: Remove timeout from session initialization to avoid "Timeout context manager" error
             # in Streamlit's async/sync hybrid environment.
+            # We will use the timeout in the individual requests if needed, 
+            # or rely on the fact that we've set a large default in the class.
             self._session = aiohttp.ClientSession(
-                auth=self.auth
+                auth=self.auth,
+                timeout=self.timeout
             )
             self._accounts = AccountsRouter(self._session, self.base_url)
             self._archived_bots = ArchivedBotsRouter(self._session, self.base_url)
@@ -80,7 +108,7 @@ class HummingbotAPIClient:
             self._connectors = ConnectorsRouter(self._session, self.base_url)
             self._controllers = ControllersRouter(self._session, self.base_url)
             self._docker = DockerRouter(self._session, self.base_url)
-            self._market_data = MarketDataRouter(self._session, self.base_url)
+            self._market_data = PatchedMarketDataRouter(self._session, self.base_url)
             self._portfolio = PortfolioRouter(self._session, self.base_url)
             self._scripts = ScriptsRouter(self._session, self.base_url)
             self._trading = TradingRouter(self._session, self.base_url)
