@@ -132,25 +132,30 @@ async def run_backtesting(backtesting_config: BacktestingConfig):
 @router.post("/batch-run")
 async def batch_run_backtesting(batch_configs: list[BacktestingConfig]):
     """
-    Run multiple backtesting simulations sequentially (optimized for Jump-Ahead speed).
-    Each single-coin backtest is now ~3ms, so 10 coins = ~30-50ms total.
+    Run multiple backtesting simulations in TRUE PARALLEL using asyncio.gather.
+    This maximizes Mac Studio performance by running all backtests concurrently.
     """
-    results = []
-    for config in batch_configs:
+    import asyncio
+    
+    async def run_single_backtest(config: BacktestingConfig):
+        """Run a single backtest and return simplified results."""
         try:
+            # Create a fresh engine for each concurrent task to avoid state conflicts
+            engine = BacktestingEngineBase()
+            
             if isinstance(config.config, str):
-                controller_config = backtesting_engine.get_controller_config_instance_from_yml(
+                controller_config = engine.get_controller_config_instance_from_yml(
                     config_path=config.config,
                     controllers_conf_dir_path=settings.app.controllers_path,
                     controllers_module=settings.app.controllers_module
                 )
             else:
-                controller_config = backtesting_engine.get_controller_config_instance_from_dict(
+                controller_config = engine.get_controller_config_instance_from_dict(
                     config_data=config.config,
                     controllers_module=settings.app.controllers_module
                 )
             
-            bt_result = await backtesting_engine.run_backtesting(
+            bt_result = await engine.run_backtesting(
                 controller_config=controller_config,
                 trade_cost=config.trade_cost,
                 start=int(config.start_time),
@@ -159,7 +164,7 @@ async def batch_run_backtesting(batch_configs: list[BacktestingConfig]):
             )
             
             summary = bt_result["results"]
-            results.append({
+            return {
                 "trading_pair": controller_config.trading_pair,
                 "net_pnl": summary.get("net_pnl", 0),
                 "net_pnl_quote": summary.get("net_pnl_quote", 0),
@@ -169,11 +174,17 @@ async def batch_run_backtesting(batch_configs: list[BacktestingConfig]):
                 "profit_factor": summary.get("profit_factor", 0),
                 "total_positions": summary.get("total_positions", 0),
                 "performance": bt_result.get("performance", {})
-            })
+            }
         except Exception as e:
-            results.append({
+            return {
                 "trading_pair": config.config.get("trading_pair", "Unknown") if isinstance(config.config, dict) else "Unknown",
-                "error": str(e)
-            })
+                "error": str(e),
+                "net_pnl": 0, "net_pnl_quote": 0, "accuracy": 0, "sharpe_ratio": 0,
+                "max_drawdown_pct": 0, "profit_factor": 0, "total_positions": 0
+            }
     
-    return {"results": results}
+    # Launch ALL backtests concurrently - true parallelism!
+    tasks = [run_single_backtest(config) for config in batch_configs]
+    results = await asyncio.gather(*tasks)
+    
+    return {"results": list(results)}
