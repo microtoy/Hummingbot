@@ -1,20 +1,22 @@
 from decimal import Decimal
 from typing import List, Optional
 
-from pydantic import Field
+from pydantic import ConfigDict, Field
 
 from hummingbot.data_feed.candles_feed.data_types import CandlesConfig
 from hummingbot.strategy_v2.controllers.directional_trading_controller_base import (
     DirectionalTradingControllerBase,
     DirectionalTradingControllerConfigBase,
 )
-from hummingbot.strategy_v2.executors.position_executor.data_types import PositionExecutorConfig, TripleBarrierConfig
+from hummingbot.strategy_v2.executors.position_executor.data_types import PositionExecutorConfig
 
 
 class MACrossStrategyConfig(DirectionalTradingControllerConfigBase):
     """
     Configuration for a Simple Moving Average Cross Strategy with Risk Management and Compounding.
     """
+    model_config = ConfigDict(extra='allow', arbitrary_types_allowed=True)
+    
     controller_name: str = "ma_cross_strategy"
     
     # Strategy specific parameters
@@ -87,11 +89,8 @@ class MACrossStrategyController(DirectionalTradingControllerBase):
         
         if self.config.use_compounding:
             # Calculate total PNL from closed executors to determine current 'virtual balance'
-            # Note: In backtesting, this is simulated mathematically in the engine patch for performance.
-            # In live, we can use the actual performance.
             total_net_pnl_quote = sum([e.net_pnl_quote for e in self.executors_info if not e.is_active], Decimal("0"))
             profit_factor = (self.config.total_amount_quote + total_net_pnl_quote) / self.config.total_amount_quote
-            # Cap the scaling to avoid extreme sizes if needed, but here we go full compounding
             if profit_factor > 0:
                 actual_amount = amount * profit_factor
 
