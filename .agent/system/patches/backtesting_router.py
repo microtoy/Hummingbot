@@ -101,15 +101,18 @@ async def sync_candles(backtesting_config: BacktestingConfig):
 @router.post("/candles/batch-sync")
 async def batch_sync_candles(batch_configs: list[BacktestingConfig]):
     """
-    Rate-limited parallel sync of multiple trading pairs' candle data.
-    Uses semaphore to limit concurrent downloads to avoid API rate limits.
+    Smart rate-limited parallel sync of multiple trading pairs' candle data.
+    Uses semaphore to limit concurrent downloads while maximizing throughput.
     """
     import asyncio
     from types import SimpleNamespace
+    from pathlib import Path
+    import hummingbot
     from hummingbot.data_feed.candles_feed.candles_base import CandlesBase
     
-    # Limit concurrent downloads to 2 to avoid Binance rate limits
-    semaphore = asyncio.Semaphore(2)
+    # Higher concurrency (3) with shorter delay (0.2s) for better throughput
+    # Binance limit is 2400 req/min = 40 req/sec, we're well under that
+    semaphore = asyncio.Semaphore(3)
     
     async def sync_single_pair(config: BacktestingConfig):
         """Sync a single trading pair's data with rate limiting."""
@@ -137,15 +140,25 @@ async def batch_sync_candles(batch_configs: list[BacktestingConfig]):
                 
                 await engine.initialize_backtesting_data_provider()
                 
-                # Small delay after each download to be gentle on the API
-                await asyncio.sleep(0.5)
+                # Get row count
+                cache_dir = Path(hummingbot.data_path()) / "candles"
+                filename = f"{controller_config.connector_name}_{controller_config.trading_pair}_{interval}.csv"
+                cache_file = cache_dir / filename
+                row_count = 0
+                if cache_file.exists():
+                    import pandas as pd
+                    df = pd.read_csv(cache_file)
+                    row_count = len(df)
                 
-                return {"pair": controller_config.trading_pair, "status": "success"}
+                # Short delay between requests
+                await asyncio.sleep(0.2)
+                
+                return {"pair": controller_config.trading_pair, "status": "success", "rows": row_count}
             except Exception as e:
                 pair = config.config.get("trading_pair", "Unknown") if isinstance(config.config, dict) else "Unknown"
                 return {"pair": pair, "status": "error", "message": str(e)}
     
-    # Launch ALL sync tasks (semaphore will limit actual concurrency)
+    # Launch ALL sync tasks (semaphore will limit actual concurrency to 3)
     tasks = [sync_single_pair(config) for config in batch_configs]
     results = await asyncio.gather(*tasks)
     

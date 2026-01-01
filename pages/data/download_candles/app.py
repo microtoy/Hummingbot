@@ -81,41 +81,43 @@ if sync_top10:
     start_datetime = datetime.combine(start_date, time.min)
     end_datetime = datetime.combine(end_date, time.max)
     
-    st.info("� 增量下载：系统会检查本地缓存，只下载缺失的部分数据。首次下载较慢，后续只需更新增量。")
-    
-    progress_bar = st.progress(0, text="Preparing...")
-    status_container = st.container()
-    
-    success_count = 0
-    total = len(TOP_10_PAIRS)
-    
-    for i, pair in enumerate(TOP_10_PAIRS):
-        progress_bar.progress((i) / total, text=f"🔄 Syncing {pair}... ({i+1}/{total})")
+    with st.status("🔥 Parallel syncing Top 10 coins (3 concurrent)...", expanded=True) as status:
+        st.info("💡 增量下载：系统会检查本地缓存，只下载缺失的部分数据。")
+        
+        # Build batch configs
+        batch_configs = []
+        for pair in TOP_10_PAIRS:
+            batch_configs.append({
+                "config": {
+                    "controller_name": "Generic",
+                    "connector_name": connector,
+                    "trading_pair": pair,
+                    "candles_config": []
+                },
+                "start_time": int(start_datetime.timestamp()),
+                "end_time": int(end_datetime.timestamp()),
+                "backtesting_resolution": interval,
+                "trade_cost": 0.0006
+            })
         
         try:
-            config = {
-                "controller_name": "Generic",
-                "connector_name": connector,
-                "trading_pair": pair,
-                "candles_config": []
-            }
-            result = backend_api_client.backtesting.sync_candles(
-                start_time=int(start_datetime.timestamp()),
-                end_time=int(end_datetime.timestamp()),
-                backtesting_resolution=interval,
-                config=config
-            )
-            
-            if result.get("status") == "success":
-                status_container.write(f"✅ {pair} - {result.get('message', 'Done')}")
-                success_count += 1
+            result = backend_api_client.backtesting.batch_sync(batch_configs)
+            if "results" in result:
+                success_count = result.get("success", 0)
+                total = result.get("total", len(TOP_10_PAIRS))
+                status.update(label=f"✅ Complete! {success_count}/{total} succeeded", state="complete")
+                
+                # Show individual results with row counts
+                for r in result["results"]:
+                    if r.get("status") == "success":
+                        rows = r.get("rows", 0)
+                        st.write(f"✅ {r['pair']} - {rows:,} rows")
+                    else:
+                        st.write(f"❌ {r['pair']}: {r.get('message', 'Unknown error')}")
             else:
-                status_container.write(f"❌ {pair} - {result.get('error', 'Unknown error')}")
+                st.error(f"Sync failed: {result.get('error', 'Unknown error')}")
         except Exception as e:
-            status_container.write(f"❌ {pair} - {e}")
-    
-    progress_bar.progress(1.0, text=f"✅ Complete! {success_count}/{total} succeeded")
-    st.success(f"🎉 Top 10 同步完成！成功: {success_count}/{total}")
+            st.error(f"Error: {e}")
 
 
 if get_data_button:
