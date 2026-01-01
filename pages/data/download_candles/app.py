@@ -89,9 +89,9 @@ if sync_top10:
     progress_bar = st.progress(0, text="Starting parallel sync...")
     status_table = st.empty()
     
-    # Track status for each coin
+    # Track status for each coin (using list for mutable counter)
     coin_status = {pair: {"status": "⏳ Waiting...", "rows": "-"} for pair in TOP_10_PAIRS}
-    completed_count = 0
+    progress_tracker = [0]  # Use list to avoid nonlocal issues
     total = len(TOP_10_PAIRS)
     
     def update_display():
@@ -109,8 +109,6 @@ if sync_top10:
     
     async def sync_single_coin(pair: str):
         """Sync a single coin with progress tracking."""
-        nonlocal completed_count
-        
         async with semaphore:
             coin_status[pair]["status"] = "🔄 Syncing..."
             update_display()
@@ -140,8 +138,8 @@ if sync_top10:
                 coin_status[pair]["status"] = f"❌ {str(e)[:30]}..."
                 coin_status[pair]["rows"] = "-"
             
-            completed_count += 1
-            progress_bar.progress(completed_count / total, text=f"Completed {completed_count}/{total} coins")
+            progress_tracker[0] += 1
+            progress_bar.progress(progress_tracker[0] / total, text=f"Completed {progress_tracker[0]}/{total} coins")
             update_display()
     
     # Run all syncs in parallel
