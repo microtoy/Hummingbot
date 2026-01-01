@@ -193,9 +193,10 @@ if sync_top10:
                 
                 # Each coin might have 1 or 2 gaps (prefix and/or suffix)
                 for g_start, g_end in gaps:
-                    # Dynamic chunk: 30% of gap duration, min 5 days (in seconds)
+                    # Dynamic chunk: 30% of gap duration, min 5 days, max 30 days
+                    # Capping at 30 days prevents massive requests (1.5M+ rows) that cause timeouts
                     gap_duration = g_end - g_start
-                    CHUNK_SIZE = max(5 * 24 * 3600, int(gap_duration * 0.3))
+                    CHUNK_SIZE = min(30 * 24 * 3600, max(5 * 24 * 3600, int(gap_duration * 0.3)))
                     curr = g_start
                     
                     while curr < g_end:
@@ -205,8 +206,6 @@ if sync_top10:
                         pct = int((duration_synced + (curr - g_start)) / total_duration * 100)
                         d1 = datetime.fromtimestamp(curr).strftime('%m/%d')
                         d2 = datetime.fromtimestamp(chunk_end).strftime('%m/%d')
-                        coin_status[pair]["status"] = f"📥 {d1}→{d2} ({pct}%)"
-                        update_display()
                         
                         payload = {
                             "start_time": curr, "end_time": chunk_end,
@@ -217,20 +216,38 @@ if sync_top10:
                             }
                         }
                         
-                        async with session.post(f"{api_url}/backtesting/candles/sync", json=payload, timeout=600) as resp:
-                            if resp.status == 200:
-                                res = await resp.json()
-                                if res.get("status") == "success":
-                                    last_rows = res.get("rows", last_rows)
-                                    coin_status[pair]["rows"] = f"{last_rows:,} 📈"
-                                else:
-                                    coin_status[pair]["status"] = f"❌ {str(res.get('error'))[:20]}"
-                                    update_display()
-                                    return
-                            else:
-                                coin_status[pair]["status"] = f"❌ HTTP {resp.status}"
+                        # RETRY LOGIC (3 attempts)
+                        success = False
+                        for attempt in range(3):
+                            try:
+                                coin_status[pair]["status"] = f"📥 {d2} ({pct}%)" + (f" [Try {attempt+1}]" if attempt > 0 else "")
                                 update_display()
-                                return
+                                
+                                async with session.post(f"{api_url}/backtesting/candles/sync", json=payload, timeout=600) as resp:
+                                    if resp.status == 200:
+                                        res = await resp.json()
+                                        if res.get("status") == "success":
+                                            last_rows = res.get("rows", last_rows)
+                                            coin_status[pair]["rows"] = f"{last_rows:,} 📈"
+                                            success = True
+                                            break
+                                        else:
+                                            err_msg = str(res.get('error'))[:20]
+                                            if attempt == 2:
+                                                coin_status[pair]["status"] = f"❌ {err_msg}"
+                                    else:
+                                        if attempt == 2:
+                                            coin_status[pair]["status"] = f"❌ HTTP {resp.status}"
+                            except Exception as e:
+                                if attempt == 2:
+                                    coin_status[pair]["status"] = f"❌ {str(e)[:25]}..."
+                            
+                            if not success:
+                                await asyncio.sleep(5) # Wait before retry
+                        
+                        if not success:
+                            update_display()
+                            return
                         
                         curr = chunk_end
                     duration_synced += (g_end - g_start)
