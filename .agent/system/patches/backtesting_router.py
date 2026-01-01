@@ -15,8 +15,9 @@ backtesting_engine = BacktestingEngineBase()
 
 @router.get("/candles/status")
 async def get_candles_status():
-    """Get the status of cached candles on the server."""
+    """Get the status of cached candles on the server, including internal gaps (holes)."""
     try:
+        from hummingbot.data_feed.candles_feed.candles_base import CandlesBase
         cache_dir = Path(hummingbot.data_path()) / "candles"
         if not cache_dir.exists():
             return {"cached_files": []}
@@ -24,13 +25,38 @@ async def get_candles_status():
         files = []
         for f in cache_dir.glob("*.csv"):
             try:
+                # Extract interval from filename: connector_pair_interval.csv
+                parts = f.stem.split("_")
+                interval = parts[-1]
+                interval_sec = CandlesBase.interval_to_seconds.get(interval, 60)
+
                 df = pd.read_csv(f, usecols=["timestamp"])
                 if not df.empty:
+                    df = df.sort_values("timestamp")
+                    ts = df["timestamp"].values
+                    start_ts = int(ts[0])
+                    end_ts = int(ts[-1])
+                    
+                    # DETECT INTERNAL GAPS (Holes)
+                    # A gap exists if the difference between consecutive timestamps > interval_sec
+                    gaps = []
+                    # Optimization: Only check if count is significantly less than expected
+                    expected_count = (end_ts - start_ts) // interval_sec + 1
+                    if len(ts) < expected_count:
+                        diffs = ts[1:] - ts[:-1]
+                        gap_indices = (diffs > interval_sec * 1.5).nonzero()[0] # 1.5 for tolerance
+                        for idx in gap_indices:
+                            gaps.append({
+                                "start": int(ts[idx]),
+                                "end": int(ts[idx+1])
+                            })
+                    
                     files.append({
                         "file": f.name,
                         "count": len(df),
-                        "start": int(df["timestamp"].min()),
-                        "end": int(df["timestamp"].max())
+                        "start": start_ts,
+                        "end": end_ts,
+                        "holes": gaps
                     })
             except:
                 continue

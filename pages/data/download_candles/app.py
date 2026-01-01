@@ -163,6 +163,15 @@ if sync_top10:
                 # Use 1h tolerance for suffix
                 if real_target_end > c_end + 3600: 
                     gaps.append((c_end, real_target_end))
+                
+                # CHECK FOR INTERNAL HOLES (Stitching interrupted downloads)
+                if "holes" in file_cache and file_cache["holes"]:
+                    for hole in file_cache["holes"]:
+                        h_start = int(hole["start"])
+                        h_end = int(hole["end"])
+                        # Only fill holes that intersect with our target range
+                        if h_end > target_start and h_start < target_end:
+                            gaps.append((max(h_start, target_start), min(h_end, target_end)))
             
             if not gaps:
                 # Just show the actual row count we found

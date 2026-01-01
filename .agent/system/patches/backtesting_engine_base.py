@@ -122,8 +122,8 @@ class BacktestingEngineBase:
              raise ValueError(f"❌ [CACHE INSUFFICIENT] {filename} coverage: {min_ts}->{max_ts} vs Needed: {needed_start}->{effective_needed_end}")
 
         # 2. OPTIMIZED SYNC (Only if allow_download=True)
-        # If we just need to append a suffix, we don't need to read the whole file!
-        if max_ts is not None and min_ts is not None and min_ts <= needed_start:
+        # CASE A: PURE APPEND (Fast path for Suffix)
+        if max_ts is not None and min_ts is not None and min_ts <= needed_start + 3600:
              if max_ts < effective_needed_end - 300:
                 print(f"📥 [APPEND MODE] Fetching suffix for {config.trading_pair}: {max_ts} -> {effective_needed_end}")
                 candle_feed = hummingbot.data_feed.candles_feed.candles_factory.CandlesFactory.get_candle(config)
@@ -135,11 +135,24 @@ class BacktestingEngineBase:
                     # FAST APPEND to file
                     suffix_df.to_csv(cache_file, mode='a', header=False, index=False)
                     print(f"💾 [APPENDED] {len(suffix_df)} rows to {filename}")
-                    # For returning, we might need the whole thing if it's for backtesting initialization
-                    # But if it's for SYNC, we just return empty or the rows.
                     return suffix_df
              else:
                 return pd.DataFrame()
+
+        # CASE B: HOLE FILLING (Merge required)
+        if min_ts is not None and max_ts is not None:
+             print(f"📥 [HOLE FILLING] Filling gap for {config.trading_pair} within {min_ts}-{max_ts}")
+             candle_feed = hummingbot.data_feed.candles_feed.candles_factory.CandlesFactory.get_candle(config)
+             gap_df = await candle_feed.get_historical_candles(config=HistoricalCandlesConfig(
+                 connector_name=config.connector, trading_pair=config.trading_pair,
+                 interval=config.interval, start_time=needed_start, end_time=needed_end
+             ))
+             if gap_df is not None and not gap_df.empty:
+                 old_df = pd.read_csv(cache_file)
+                 merged_df = pd.concat([old_df, gap_df]).drop_duplicates(subset=["timestamp"]).sort_values("timestamp")
+                 merged_df.to_csv(cache_file, index=False)
+                 print(f"💾 [STITCHED] New file size: {len(merged_df)} rows")
+                 return gap_df
 
         # 3. FULL FALLBACK (First time or prefix missing)
         print(f"📥 [FULL SYNC] Fetching {config.trading_pair}")
