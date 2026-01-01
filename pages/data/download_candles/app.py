@@ -78,46 +78,84 @@ if sync_to_server:
             st.rerun()
 
 if sync_top10:
+    import asyncio
+    
     start_datetime = datetime.combine(start_date, time.min)
     end_datetime = datetime.combine(end_date, time.max)
     
-    with st.status("🔥 Parallel syncing Top 10 coins (3 concurrent)...", expanded=True) as status:
-        st.info("💡 增量下载：系统会检查本地缓存，只下载缺失的部分数据。")
+    st.info("💡 增量下载：系统会检查本地缓存，只下载缺失的部分数据。")
+    
+    # Create UI elements for live updates
+    progress_bar = st.progress(0, text="Starting parallel sync...")
+    status_table = st.empty()
+    
+    # Track status for each coin
+    coin_status = {pair: {"status": "⏳ Waiting...", "rows": "-"} for pair in TOP_10_PAIRS}
+    completed_count = 0
+    total = len(TOP_10_PAIRS)
+    
+    def update_display():
+        """Update the status table."""
+        df_status = pd.DataFrame([
+            {"Coin": pair, "Status": info["status"], "Rows": info["rows"]}
+            for pair, info in coin_status.items()
+        ])
+        status_table.dataframe(df_status, use_container_width=True, hide_index=True)
+    
+    update_display()
+    
+    # Semaphore to limit concurrent syncs (match backend limit)
+    semaphore = asyncio.Semaphore(3)
+    
+    async def sync_single_coin(pair: str):
+        """Sync a single coin with progress tracking."""
+        nonlocal completed_count
         
-        # Build batch configs
-        batch_configs = []
-        for pair in TOP_10_PAIRS:
-            batch_configs.append({
-                "config": {
+        async with semaphore:
+            coin_status[pair]["status"] = "🔄 Syncing..."
+            update_display()
+            
+            try:
+                config = {
                     "controller_name": "Generic",
                     "connector_name": connector,
                     "trading_pair": pair,
                     "candles_config": []
-                },
-                "start_time": int(start_datetime.timestamp()),
-                "end_time": int(end_datetime.timestamp()),
-                "backtesting_resolution": interval,
-                "trade_cost": 0.0006
-            })
-        
-        try:
-            result = backend_api_client.backtesting.batch_sync(batch_configs)
-            if "results" in result:
-                success_count = result.get("success", 0)
-                total = result.get("total", len(TOP_10_PAIRS))
-                status.update(label=f"✅ Complete! {success_count}/{total} succeeded", state="complete")
+                }
+                result = await backend_api_client._backtesting.sync_candles(
+                    start_time=int(start_datetime.timestamp()),
+                    end_time=int(end_datetime.timestamp()),
+                    backtesting_resolution=interval,
+                    config=config
+                )
                 
-                # Show individual results with row counts
-                for r in result["results"]:
-                    if r.get("status") == "success":
-                        rows = r.get("rows", 0)
-                        st.write(f"✅ {r['pair']} - {rows:,} rows")
-                    else:
-                        st.write(f"❌ {r['pair']}: {r.get('message', 'Unknown error')}")
-            else:
-                st.error(f"Sync failed: {result.get('error', 'Unknown error')}")
-        except Exception as e:
-            st.error(f"Error: {e}")
+                if result.get("status") == "success":
+                    rows = result.get("rows", 0)
+                    coin_status[pair]["status"] = "✅ Done"
+                    coin_status[pair]["rows"] = f"{rows:,}"
+                else:
+                    coin_status[pair]["status"] = f"❌ {result.get('error', 'Error')}"
+                    coin_status[pair]["rows"] = "-"
+            except Exception as e:
+                coin_status[pair]["status"] = f"❌ {str(e)[:30]}..."
+                coin_status[pair]["rows"] = "-"
+            
+            completed_count += 1
+            progress_bar.progress(completed_count / total, text=f"Completed {completed_count}/{total} coins")
+            update_display()
+    
+    # Run all syncs in parallel
+    async def run_all_syncs():
+        tasks = [sync_single_coin(pair) for pair in TOP_10_PAIRS]
+        await asyncio.gather(*tasks)
+    
+    # Execute async tasks
+    asyncio.run(run_all_syncs())
+    
+    # Final summary
+    success_count = sum(1 for info in coin_status.values() if "✅" in info["status"])
+    progress_bar.progress(1.0, text=f"✅ Complete! {success_count}/{total} succeeded")
+    st.success(f"🎉 Top 10 同步完成！成功: {success_count}/{total}")
 
 
 if get_data_button:
