@@ -132,38 +132,64 @@ class BacktestingEngineBase:
                     interval=config.interval, start_time=max_ts + 1, end_time=effective_needed_end
                 ))
                 if suffix_df is not None and not suffix_df.empty:
-                    # FAST APPEND to file
-                    suffix_df.to_csv(cache_file, mode='a', header=False, index=False)
-                    print(f"💾 [APPENDED] {len(suffix_df)} rows to {filename}")
-                    return suffix_df
+                    # ALIGN COLUMNS with existing file to prevent corruption
+                    try:
+                        header_df = pd.read_csv(cache_file, nrows=0)
+                        # Filter only columns present in both
+                        common_cols = [c for c in header_df.columns if c in suffix_df.columns]
+                        suffix_df = suffix_df[common_cols]
+                        # Append to file
+                        suffix_df.to_csv(cache_file, mode='a', header=False, index=False)
+                        print(f"💾 [APPENDED] {len(suffix_df)} rows to {filename}")
+                        return suffix_df
+                    except Exception as e:
+                        print(f"⚠️ [APPEND FAILED] Falling back to Full Sync: {e}")
+                        # If append fails, we fall back to full fallback logic
              else:
                 return pd.DataFrame()
 
         # CASE B: HOLE FILLING (Merge required)
         if min_ts is not None and max_ts is not None:
-             print(f"📥 [HOLE FILLING] Filling gap for {config.trading_pair} within {min_ts}-{max_ts}")
-             candle_feed = hummingbot.data_feed.candles_feed.candles_factory.CandlesFactory.get_candle(config)
-             gap_df = await candle_feed.get_historical_candles(config=HistoricalCandlesConfig(
-                 connector_name=config.connector, trading_pair=config.trading_pair,
-                 interval=config.interval, start_time=needed_start, end_time=needed_end
-             ))
-             if gap_df is not None and not gap_df.empty:
-                 old_df = pd.read_csv(cache_file)
-                 merged_df = pd.concat([old_df, gap_df]).drop_duplicates(subset=["timestamp"]).sort_values("timestamp")
-                 merged_df.to_csv(cache_file, index=False)
-                 print(f"💾 [STITCHED] New file size: {len(merged_df)} rows")
-                 return gap_df
+             try:
+                 print(f"📥 [HOLE FILLING] Filling gap for {config.trading_pair} within {min_ts}-{max_ts}")
+                 candle_feed = hummingbot.data_feed.candles_feed.candles_factory.CandlesFactory.get_candle(config)
+                 gap_df = await candle_feed.get_historical_candles(config=HistoricalCandlesConfig(
+                     connector_name=config.connector, trading_pair=config.trading_pair,
+                     interval=config.interval, start_time=needed_start, end_time=needed_end
+                 ))
+                 if gap_df is not None and not gap_df.empty:
+                     old_df = pd.read_csv(cache_file)
+                     # Align columns
+                     common_cols = [c for c in old_df.columns if c in gap_df.columns]
+                     gap_df = gap_df[common_cols]
+                     old_df = old_df[common_cols]
+                     
+                     merged_df = pd.concat([old_df, gap_df], axis=0).drop_duplicates(subset=["timestamp"]).sort_values("timestamp")
+                     merged_df.to_csv(cache_file, index=False)
+                     print(f"💾 [STITCHED] New file size: {len(merged_df)} rows")
+                     return gap_df
+             except Exception as e:
+                 print(f"⚠️ [MERGE FAILED] {e}")
+                 # Fall through to Full Sync
 
-        # 3. FULL FALLBACK (First time or prefix missing)
-        print(f"📥 [FULL SYNC] Fetching {config.trading_pair}")
-        merged_df = await self.backtesting_data_provider.get_candles_feed(config)
-        if merged_df is not None and not merged_df.empty:
-             # If file existed but min_ts was too late, we need to merge
-             if cache_file.exists():
-                 old_df = pd.read_csv(cache_file)
-                 merged_df = pd.concat([old_df, merged_df]).drop_duplicates(subset=["timestamp"]).sort_values("timestamp")
-             merged_df.to_csv(cache_file, index=False)
-             return merged_df
+        # 3. FULL FALLBACK (First time, prefix missing, or merge failed)
+        try:
+            print(f"📥 [FULL SYNC] Fetching {config.trading_pair}")
+            merged_df = await self.backtesting_data_provider.get_candles_feed(config)
+            if merged_df is not None and not merged_df.empty:
+                 # If file existed, try to merge one last time or just overwrite
+                 if cache_file.exists():
+                     try:
+                         old_df = pd.read_csv(cache_file)
+                         common_cols = [c for c in old_df.columns if c in merged_df.columns]
+                         merged_df = pd.concat([old_df[common_cols], merged_df[common_cols]], axis=0).drop_duplicates(subset=["timestamp"]).sort_values("timestamp")
+                     except:
+                         pass # Use the new data as is
+                 merged_df.to_csv(cache_file, index=False)
+                 return merged_df
+        except Exception as e:
+            print(f"❌ [DOWNLOAD ERROR] {config.trading_pair}: {e}")
+            raise e
         
         return pd.DataFrame()
 
