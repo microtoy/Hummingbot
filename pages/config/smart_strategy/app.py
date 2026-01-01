@@ -178,7 +178,7 @@ def safe_backtesting_section(inputs, backend_api_client):
                                 'net_pnl': '{:.2%}', 'net_pnl_quote': '${:.2f}',
                                 'accuracy': '{:.1%}', 'sharpe_ratio': '{:.2f}',
                                 'profit_factor': '{:.2f}', 'max_drawdown_pct': '{:.2%}'
-                            }).background_gradient(subset=['net_pnl'], cmap='RdYlGn'),
+                            }),
                             use_container_width=True, hide_index=True
                         )
                         
