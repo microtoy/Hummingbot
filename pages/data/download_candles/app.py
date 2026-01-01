@@ -61,7 +61,8 @@ if sync_to_server:
         if "error" in res:
             st.error(f"Sync failed: {res['error']}")
         else:
-            st.success("✅ Synced to server! It's now available for instant backtesting.")
+            st.success("✅ 数据已同步到服务器磁盘！")
+            st.info("💡 **小技巧**：如果你的策略需要计算均线等指标，建议在这里同步时多选 1-2 天的数据作为 Buffer，这样回测时就能 100% 命中缓存实现秒开了。")
             st.rerun()
 
 if get_data_button:
