@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, List, Dict, Any
 import aiohttp
 from .routers import (
     AccountsRouter,
@@ -13,6 +13,31 @@ from .routers import (
     ScriptsRouter,
     TradingRouter
 )
+
+class PatchedBacktestingRouter(BacktestingRouter):
+    """Extended BacktestingRouter with cache management features."""
+    
+    async def get_candles_status(self) -> Dict[str, Any]:
+        """Get the status of cached candles on the server."""
+        return await self._get("/backtesting/candles/status")
+
+    async def sync_candles(
+        self,
+        start_time: int,
+        end_time: int,
+        backtesting_resolution: str = "1m",
+        trade_cost: float = 0.0006,
+        config: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Prefetch and cache candles on the server."""
+        payload = {
+            "start_time": start_time,
+            "end_time": end_time,
+            "backtesting_resolution": backtesting_resolution,
+            "trade_cost": trade_cost,
+            "config": config or {}
+        }
+        return await self._post("/backtesting/candles/sync", json=payload)
 
 
 class HummingbotAPIClient:
@@ -50,7 +75,7 @@ class HummingbotAPIClient:
             )
             self._accounts = AccountsRouter(self._session, self.base_url)
             self._archived_bots = ArchivedBotsRouter(self._session, self.base_url)
-            self._backtesting = BacktestingRouter(self._session, self.base_url)
+            self._backtesting = PatchedBacktestingRouter(self._session, self.base_url)
             self._bot_orchestration = BotOrchestrationRouter(self._session, self.base_url)
             self._connectors = ConnectorsRouter(self._session, self.base_url)
             self._controllers = ControllersRouter(self._session, self.base_url)

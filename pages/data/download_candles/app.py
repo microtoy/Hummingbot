@@ -1,4 +1,4 @@
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -10,7 +10,24 @@ from frontend.st_utils import get_backend_api_client, initialize_st_page
 initialize_st_page(title="Download Candles", icon="💾")
 backend_api_client = get_backend_api_client()
 
-c1, c2, c3, c4 = st.columns([2, 2, 2, 0.5])
+# Sidebar: Server Cache Status
+st.sidebar.write("### 🖥️ Server Cache Status")
+try:
+    cache_status = backend_api_client.backtesting.get_candles_status()
+    if "cached_files" in cache_status and len(cache_status["cached_files"]) > 0:
+        for f in cache_status["cached_files"]:
+            start_dt = datetime.fromtimestamp(f["start"]).strftime('%Y-%m-%d %H:%M')
+            end_dt = datetime.fromtimestamp(f["end"]).strftime('%Y-%m-%d %H:%M')
+            with st.sidebar.expander(f"📦 {f['file']}"):
+                st.write(f"**Rows:** {f['count']:,}")
+                st.write(f"**From:** {start_dt}")
+                st.write(f"**To:** {end_dt}")
+    else:
+        st.sidebar.info("Cache is empty.")
+except Exception as e:
+    st.sidebar.error("Ready to sync to server.")
+
+c1, c2, c3, c4 = st.columns([2, 2, 2, 1.5])
 with c1:
     connector = st.selectbox("Exchange",
                              ["binance_perpetual", "binance", "gate_io", "gate_io_perpetual", "kucoin", "ascend_ex"],
@@ -19,10 +36,33 @@ with c1:
 with c2:
     interval = st.selectbox("Interval", options=["1m", "3m", "5m", "15m", "1h", "4h", "1d", "1s"])
 with c3:
-    start_date = st.date_input("Start Date", value=datetime(2023, 1, 1))
-    end_date = st.date_input("End Date", value=datetime(2023, 1, 2))
+    start_date = st.date_input("Start Date", value=datetime.now() - timedelta(days=2))
+    end_date = st.date_input("End Date", value=datetime.now() - timedelta(days=1))
 with c4:
-    get_data_button = st.button("Get Candles!")
+    get_data_button = st.button("Get Candles! (Browser)")
+    sync_to_server = st.button("Sync to Server Cache 🚀")
+
+if sync_to_server:
+    start_datetime = datetime.combine(start_date, time.min)
+    end_datetime = datetime.combine(end_date, time.max)
+    with st.spinner("Syncing candles to server cache..."):
+        dummy_config = {
+            "controller_name": "Generic",
+            "connector_name": connector,
+            "trading_pair": trading_pair,
+            "candles_config": []
+        }
+        res = backend_api_client.backtesting.sync_candles(
+            start_time=int(start_datetime.timestamp()),
+            end_time=int(end_datetime.timestamp()),
+            backtesting_resolution=interval,
+            config=dummy_config
+        )
+        if "error" in res:
+            st.error(f"Sync failed: {res['error']}")
+        else:
+            st.success("✅ Synced to server! It's now available for instant backtesting.")
+            st.rerun()
 
 if get_data_button:
     start_datetime = datetime.combine(start_date, time.min)
@@ -39,6 +79,10 @@ if get_data_button:
         end_time=int(end_datetime.timestamp())
     )
 
+    if "error" in candles:
+        st.error(candles["error"])
+        st.stop()
+
     candles_df = pd.DataFrame(candles)
     candles_df.index = pd.to_datetime(candles_df["timestamp"], unit='s')
 
@@ -51,8 +95,8 @@ if get_data_button:
         close=candles_df['close']
     )])
     fig.update_layout(
-        height=1000,
-        title="Candlesticks",
+        height=800,
+        title=f"{trading_pair} Candlesticks",
         xaxis_title="Time",
         yaxis_title="Price",
         template="plotly_dark",
@@ -66,7 +110,7 @@ if get_data_button:
     csv = candles_df.to_csv(index=False)
     filename = f"{connector}_{trading_pair}_{start_date.strftime('%Y%m%d')}_{end_date.strftime('%Y%m%d')}.csv"
     st.download_button(
-        label="Download Candles as CSV",
+        label="Download CSV to Browser",
         data=csv,
         file_name=filename,
         mime='text/csv',

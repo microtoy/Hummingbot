@@ -140,38 +140,61 @@ class BacktestingEngineBase:
             await self._get_candles_with_cache(config)
 
     async def _get_candles_with_cache(self, config: CandlesConfig):
-        """Helper to get candles with disk caching."""
+        """Helper to get candles with smart disk caching."""
         import hummingbot
-        cache_dir = Path(hummingbot.data_path()) / "candles_cache"
+        cache_dir = Path(hummingbot.data_path()) / "candles"
         cache_dir.mkdir(parents=True, exist_ok=True)
         
-        # Generate a unique hash for this specific request
-        cache_key = f"{config.connector}_{config.trading_pair}_{config.interval}_{self.backtesting_data_provider.start_time}_{self.backtesting_data_provider.end_time}"
-        cache_hash = hashlib.md5(cache_key.encode()).hexdigest()
-        cache_file = cache_dir / f"{cache_hash}.csv"
+        # Consistent filename for the same pair/interval
+        filename = f"{config.connector}_{config.trading_pair}_{config.interval.replace('m', 'm')}.csv"
+        cache_file = cache_dir / filename
         
+        start_ts = self.backtesting_data_provider.start_time
+        end_ts = self.backtesting_data_provider.end_time
+        
+        full_df = None
         if cache_file.exists():
             try:
-                # Load from disk
-                df = pd.read_csv(cache_file)
-                # Success! Inject into market data provider
-                key = self.backtesting_data_provider._generate_candle_feed_key(config)
-                self.backtesting_data_provider.candles_feeds[key] = df
-                return df
-            except Exception as e:
-                # Fallback to normal download if cache load fails
-                pass
-                
-        # Normal path: download from exchange
-        df = await self.backtesting_data_provider.get_candles_feed(config)
+                # Load existing data
+                full_df = pd.read_csv(cache_file)
+                if not full_df.empty:
+                    min_ts = full_df["timestamp"].min()
+                    max_ts = full_df["timestamp"].max()
+                    
+                    # If requested range is a subset of local data, return from local
+                    if min_ts <= start_ts and max_ts >= end_ts:
+                        result_df = full_df[(full_df["timestamp"] >= start_ts) & (full_df["timestamp"] <= end_ts)].copy()
+                        key = self.backtesting_data_provider._generate_candle_feed_key(config)
+                        self.backtesting_data_provider.candles_feeds[key] = result_df
+                        return result_df
+            except Exception:
+                full_df = None
+
+        # Download needed range (either missing some or no file)
+        # Hummingbot's get_candles_feed downloads [start_ts - buffer, end_ts]
+        new_df = await self.backtesting_data_provider.get_candles_feed(config)
         
-        # Save to disk for next time
-        if df is not None and not df.empty:
+        if new_df is not None and not new_df.empty:
+            if full_df is not None and not full_df.empty:
+                # Merge and deduplicate
+                merged_df = pd.concat([full_df, new_df])
+                merged_df.drop_duplicates(subset=["timestamp"], inplace=True)
+                merged_df.sort_values("timestamp", inplace=True)
+                full_df = merged_df
+            else:
+                full_df = new_df
+            
+            # Save the cumulative data
             try:
-                df.to_csv(cache_file, index=False)
-            except:
+                full_df.to_csv(cache_file, index=False)
+            except Exception:
                 pass
-        return df
+            
+            # Return precisely requested slice
+            result_df = full_df[(full_df["timestamp"] >= start_ts) & (full_df["timestamp"] <= end_ts)].copy()
+            return result_df
+        
+        return new_df
 
     async def simulate_execution(self, trade_cost: float) -> list:
         """
