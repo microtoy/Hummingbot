@@ -65,11 +65,9 @@ async def sync_candles(backtesting_config: BacktestingConfig):
                 controllers_module=settings.app.controllers_module
             )
             
-        # 2. Pad the start time with buffer (Generous 2000 candles to ensure hits)
-        from hummingbot.data_feed.candles_feed.candles_base import CandlesBase
-        interval = backtesting_config.backtesting_resolution
-        buffer_seconds = 2000 * CandlesBase.interval_to_seconds.get(interval, 60)
-        padded_start = int(backtesting_config.start_time - buffer_seconds)
+        # 2. Use exact range for sync (No heavy padding needed here as engine handles its own buffer if needed)
+        # But for sync, we just want to fill the requested chunk.
+        padded_start = int(backtesting_config.start_time)
         
         # 3. Trigger initialization (which hits the smart cache in engine)
         backtesting_engine.backtesting_data_provider.update_backtesting_time(
@@ -81,20 +79,22 @@ async def sync_candles(backtesting_config: BacktestingConfig):
         backtesting_engine.allow_download = True
         await backtesting_engine.initialize_backtesting_data_provider()
         
-        # 4. Get row count from cache file
+        # 4. Get row count FAST (Binary line count)
         cache_dir = Path(hummingbot.data_path()) / "candles"
         filename = f"{controller_config.connector_name}_{controller_config.trading_pair}_{interval}.csv"
         cache_file = cache_dir / filename
         
         row_count = 0
         if cache_file.exists():
-            import pandas as pd
-            df = pd.read_csv(cache_file)
-            row_count = len(df)
+            try:
+                with open(cache_file, 'rb') as f:
+                    row_count = sum(1 for _ in f) - 1 # Faster than pandas for count
+            except:
+                row_count = 0
         
         return {
             "status": "success", 
-            "message": f"Synced {row_count:,} rows ({buffer_seconds/3600:.1f}h buffer)",
+            "message": f"Synced {row_count:,} rows",
             "rows": row_count
         }
     except Exception as e:

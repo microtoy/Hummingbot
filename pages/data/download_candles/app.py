@@ -135,8 +135,8 @@ if sync_top10:
                 total_end = int(end_datetime.timestamp())
                 total_duration = total_end - total_start
                 
-                # Chunk size: 2 days (in seconds) for extremely smooth progress
-                CHUNK_SIZE = 2 * 24 * 3600
+                # Chunk size: 5 days (in seconds) - Balanced for speed and granularity
+                CHUNK_SIZE = 5 * 24 * 3600
                 
                 current_start = total_start
                 api_endpoint = f"{api_url}/backtesting/candles/sync"
