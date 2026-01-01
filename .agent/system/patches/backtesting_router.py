@@ -68,6 +68,7 @@ async def sync_candles(backtesting_config: BacktestingConfig):
         # 2. Use exact range for sync (No heavy padding needed here as engine handles its own buffer if needed)
         # But for sync, we just want to fill the requested chunk.
         padded_start = int(backtesting_config.start_time)
+        interval = backtesting_config.backtesting_resolution
         
         # 3. Trigger initialization (which hits the smart cache in engine)
         backtesting_engine.backtesting_data_provider.update_backtesting_time(
