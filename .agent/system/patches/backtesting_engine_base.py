@@ -140,7 +140,7 @@ class BacktestingEngineBase:
             await self._get_candles_with_cache(config)
 
     async def _get_candles_with_cache(self, config: CandlesConfig):
-        """Helper to get candles with simplified 'File-First' caching."""
+        """Helper to get candles with simplified cumulative caching."""
         import hummingbot
         from hummingbot.data_feed.candles_feed.candles_base import CandlesBase
 
@@ -155,39 +155,48 @@ class BacktestingEngineBase:
         needed_start = int(self.backtesting_data_provider.start_time - candles_buffer)
         needed_end = int(self.backtesting_data_provider.end_time)
         
+        full_df = pd.DataFrame()
         if cache_file.exists():
             try:
-                df = pd.read_csv(cache_file)
-                if not df.empty:
-                    min_ts = df["timestamp"].min()
-                    max_ts = df["timestamp"].max()
+                full_df = pd.read_csv(cache_file)
+                if not full_df.empty:
+                    min_ts = full_df["timestamp"].min()
+                    max_ts = full_df["timestamp"].max()
                     
-                    # Check if local file FULLY covers the requested period
+                    # 1. OPTIMIZED HIT: If local data FULLY covers the requested period
                     if min_ts <= needed_start and max_ts >= needed_end:
-                        print(f"🚀 [CACHE HIT] Using local data for {config.trading_pair} ({len(df)} rows)")
-                        result_df = df[(df["timestamp"] >= needed_start) & (df["timestamp"] <= needed_end)].copy()
+                        print(f"🚀 [CACHE HIT] Using local data for {config.trading_pair}")
+                        result_df = full_df[(full_df["timestamp"] >= needed_start) & (full_df["timestamp"] <= needed_end)].copy()
                         key = self.backtesting_data_provider._generate_candle_feed_key(config)
                         self.backtesting_data_provider.candles_feeds[key] = result_df
                         return result_df
                     else:
-                        print(f"🔄 [CACHE MISS] Local file range ({min_ts}-{max_ts}) does not cover target ({needed_start}-{needed_end})")
+                        print(f"🔄 [CACHE PARTIAL] Local covers {min_ts}-{max_ts}, but need {needed_start}-{needed_end}")
             except Exception as e:
-                print(f"⚠️ [CACHE ERROR] {e}")
+                print(f"⚠️ [CACHE LOAD ERROR] {e}")
 
-        # If we reach here, download and OVERWRITE
-        print(f"📥 [DOWNLOADING] Fetching fresh data for {config.trading_pair}...")
+        # 2. DOWNLOAD missing/full data
+        print(f"📥 [DOWNLOADING] Fetching {config.trading_pair} ({needed_start} to {needed_end})...")
         new_df = await self.backtesting_data_provider.get_candles_feed(config)
         
         if new_df is not None and not new_df.empty:
+            if not full_df.empty:
+                # Merge and clean up
+                full_df = pd.concat([full_df, new_df])
+                full_df.drop_duplicates(subset=["timestamp"], inplace=True)
+                full_df.sort_values("timestamp", inplace=True)
+            else:
+                full_df = new_df
+                
             try:
-                # Simple overwrite - no complex merging
-                new_df.to_csv(cache_file, index=False)
-                print(f"💾 [SAVED] {filename} updated with {len(new_df)} rows")
+                # Save the cumulative file
+                full_df.to_csv(cache_file, index=False)
+                print(f"💾 [CUMULATIVE SAVE] {filename} now has {len(full_df)} rows")
             except Exception as e:
                 print(f"❌ [SAVE FAILED] {e}")
             
             # Return sliced result
-            result_df = new_df[(new_df["timestamp"] >= needed_start) & (new_df["timestamp"] <= needed_end)].copy()
+            result_df = full_df[(full_df["timestamp"] >= needed_start) & (full_df["timestamp"] <= needed_end)].copy()
             key = self.backtesting_data_provider._generate_candle_feed_key(config)
             self.backtesting_data_provider.candles_feeds[key] = result_df
             return result_df

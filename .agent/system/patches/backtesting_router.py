@@ -40,12 +40,11 @@ async def get_candles_status():
 
 @router.post("/candles/sync")
 async def sync_candles(backtesting_config: BacktestingConfig):
-    """Prefetch and cache candles without running a full backtest."""
+    """Prefetch and cache candles with automatic buffer padding."""
     try:
         from types import SimpleNamespace
-        # We only need the connector and range info
+        # 1. Determine controller config
         if isinstance(backtesting_config.config, dict) and "connector_name" in backtesting_config.config:
-            # Bypass full validation for sync
             controller_config = SimpleNamespace(
                 connector_name=backtesting_config.config["connector_name"],
                 trading_pair=backtesting_config.config["trading_pair"],
@@ -63,15 +62,21 @@ async def sync_candles(backtesting_config: BacktestingConfig):
                 controllers_module=settings.app.controllers_module
             )
             
-        backtesting_engine.backtesting_data_provider.update_backtesting_time(
-            int(backtesting_config.start_time), int(backtesting_config.end_time))
-        backtesting_engine.controller = SimpleNamespace(config=controller_config)
-        backtesting_engine.backtesting_resolution = backtesting_config.backtesting_resolution
+        # 2. Pad the start time with buffer (Standard 1000 candles)
+        from hummingbot.data_feed.candles_feed.candles_base import CandlesBase
+        interval = backtesting_config.backtesting_resolution
+        buffer_seconds = 1000 * CandlesBase.interval_to_seconds.get(interval, 60)
+        padded_start = int(backtesting_config.start_time - buffer_seconds)
         
-        # This will trigger the smart cache logic
+        # 3. Trigger initialization (which hits the smart cache in engine)
+        backtesting_engine.backtesting_data_provider.update_backtesting_time(
+            padded_start, int(backtesting_config.end_time))
+        backtesting_engine.controller = SimpleNamespace(config=controller_config)
+        backtesting_engine.backtesting_resolution = interval
+        
         await backtesting_engine.initialize_backtesting_data_provider()
         
-        return {"status": "success", "message": "Candles synced to server cache"}
+        return {"status": "success", "message": f"Synced with {buffer_seconds/3600:.1f}h buffer padding"}
     except Exception as e:
         return {"error": str(e)}
 
