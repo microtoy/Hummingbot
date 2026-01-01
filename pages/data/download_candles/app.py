@@ -144,33 +144,40 @@ if sync_top10:
             # Identify Gaps
             gaps = []
             if not file_cache:
-                # No cache at all: full range is a gap
+                # Log why it's downloading
+                # coin_status[pair]["status"] = "🔍 No Cache File found"
                 gaps.append((target_start, target_end))
             else:
                 c_start = int(file_cache["start"])
                 c_end = int(file_cache["end"])
                 
                 # Check for prefix gap (User wants data before what we have)
-                if target_start < c_start - 3600: # 1h tolerance
+                # Use 24h tolerance to avoid timezone issues
+                if target_start < c_start - 86400: 
                     gaps.append((target_start, c_start))
                 
                 # Check for suffix gap (User wants data after what we have)
-                # Note: target_end is often 'now', while cache might be slightly behind
                 effective_now = int(datetime.now().timestamp()) - 120
                 real_target_end = min(target_end, effective_now)
                 
-                if real_target_end > c_end + 300: # 5m tolerance
+                # Use 1h tolerance for suffix
+                if real_target_end > c_end + 3600: 
                     gaps.append((c_end, real_target_end))
             
             if not gaps:
+                # Just show the actual row count we found
                 coin_status[pair]["status"] = "✅ Cached"
                 if file_cache:
                     coin_status[pair]["rows"] = f"{file_cache['count']:,}"
                 update_display()
                 return
 
-            # Process Gaps
+            # If we are here, we are downloading. Let's show why in the first update if possible.
+            # But we follow the chunking logic.
             async with sem:
+                # Add a brief diagnostic if downloading
+                # if file_cache:
+                #     print(f"DEBUG: {pair} Need Download. Cache: {c_start}-{c_end}, Target: {target_start}-{target_end}")
                 total_duration = sum(g_end - g_start for g_start, g_end in gaps)
                 duration_synced = 0
                 last_rows = file_cache["count"] if file_cache else 0

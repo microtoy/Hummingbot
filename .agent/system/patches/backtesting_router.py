@@ -46,6 +46,9 @@ async def sync_candles(backtesting_config: BacktestingConfig):
         from pathlib import Path
         import hummingbot
         
+        # USE LOCAL INSTANCE to avoid race conditions during parallel syncs
+        engine = BacktestingEngineBase()
+        
         # 1. Determine controller config
         if isinstance(backtesting_config.config, dict) and "connector_name" in backtesting_config.config:
             controller_config = SimpleNamespace(
@@ -54,13 +57,13 @@ async def sync_candles(backtesting_config: BacktestingConfig):
                 candles_config=backtesting_config.config.get("candles_config", [])
             )
         elif isinstance(backtesting_config.config, str):
-            controller_config = backtesting_engine.get_controller_config_instance_from_yml(
+            controller_config = engine.get_controller_config_instance_from_yml(
                 config_path=backtesting_config.config,
                 controllers_conf_dir_path=settings.app.controllers_path,
                 controllers_module=settings.app.controllers_module
             )
         else:
-            controller_config = backtesting_engine.get_controller_config_instance_from_dict(
+            controller_config = engine.get_controller_config_instance_from_dict(
                 config_data=backtesting_config.config,
                 controllers_module=settings.app.controllers_module
             )
@@ -71,14 +74,14 @@ async def sync_candles(backtesting_config: BacktestingConfig):
         interval = backtesting_config.backtesting_resolution
         
         # 3. Trigger initialization (which hits the smart cache in engine)
-        backtesting_engine.backtesting_data_provider.update_backtesting_time(
+        engine.backtesting_data_provider.update_backtesting_time(
             padded_start, int(backtesting_config.end_time))
-        backtesting_engine.controller = SimpleNamespace(config=controller_config)
-        backtesting_engine.backtesting_resolution = interval
+        engine.controller = SimpleNamespace(config=controller_config)
+        engine.backtesting_resolution = interval
         
         # Allow download for sync operation
-        backtesting_engine.allow_download = True
-        await backtesting_engine.initialize_backtesting_data_provider()
+        engine.allow_download = True
+        await engine.initialize_backtesting_data_provider()
         
         # 4. Get row count FAST (Binary line count)
         cache_dir = Path(hummingbot.data_path()) / "candles"
