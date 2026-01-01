@@ -180,8 +180,12 @@ config["controller_type"] = "custom" # Key change: point to bots.controllers.cus
 # Market Config
 with st.expander("Market Configuration", expanded=True):
     c1, c2 = st.columns(2)
-    config["connector_name"] = c1.text_input("Connector", value=config.get("connector_name", "binance"))
-    config["trading_pair"] = c2.text_input("Trading Pair", value=config.get("trading_pair", "BTC-USDT"))
+    # Get defaults from the strategy definition if available, otherwise fallback to hardcoded
+    default_connector = selected_strat["info"]["parameters"].get("connector_name", "binance")
+    default_pair = selected_strat["info"]["parameters"].get("trading_pair", "BTC-USDT")
+    
+    config["connector_name"] = c1.text_input("Connector", value=config.get("connector_name", default_connector))
+    config["trading_pair"] = c2.text_input("Trading Pair", value=config.get("trading_pair", default_pair))
 
 # Dynamic Params
 params = selected_strat["info"]["parameters"]
