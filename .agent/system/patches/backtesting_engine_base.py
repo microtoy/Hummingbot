@@ -147,11 +147,17 @@ class BacktestingEngineBase:
         processed_features = self.prepare_market_data()
         self.active_executor_simulations: List[ExecutorSimulation] = []
         self.stopped_executors_info: List[ExecutorInfo] = []
-        for i, row in processed_features.iterrows():
+        
+        # Optimization: iterrows() is very slow. Use to_dict('records') for faster iteration.
+        records = processed_features.to_dict('records')
+        for i, row in enumerate(records):
             await self.update_state(row)
             for action in self.controller.determine_executor_actions():
                 if isinstance(action, CreateExecutorAction):
-                    executor_simulation = self.simulate_executor(action.executor_config, processed_features.loc[i:], trade_cost)
+                    # For optimization, we slice the records instead of the dataframe
+                    # Note: simulate_executor expects a dataframe slice, but we can pass records if we update it
+                    # However, for minimum change, we'll keep the dataframe slice for now but optimized iteration
+                    executor_simulation = self.simulate_executor(action.executor_config, processed_features.iloc[i:], trade_cost)
                     if executor_simulation is not None and executor_simulation.close_type != CloseType.FAILED:
                         self.manage_active_executors(executor_simulation)
                 elif isinstance(action, StopExecutorAction):
