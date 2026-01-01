@@ -12,6 +12,9 @@ router = APIRouter(tags=["Backtesting"], prefix="/backtesting")
 candles_factory = CandlesFactory()
 backtesting_engine = BacktestingEngineBase()
 
+from .candle_guardian import CandleGuardian
+guardian = CandleGuardian()
+
 
 @router.get("/candles/status")
 async def get_candles_status():
@@ -37,26 +40,33 @@ async def get_candles_status():
                     start_ts = int(ts[0])
                     end_ts = int(ts[-1])
                     
+                    # CHECK FOR HEALTH SIDECAR
+                    health_metadata = guardian.get_health_summary(f.name)
+                    
                     # DETECT INTERNAL GAPS (Holes)
-                    # A gap exists if the difference between consecutive timestamps > interval_sec
-                    gaps = []
-                    # Optimization: Only check if count is significantly less than expected
-                    expected_count = (end_ts - start_ts) // interval_sec + 1
-                    if len(ts) < expected_count:
-                        diffs = ts[1:] - ts[:-1]
-                        gap_indices = (diffs > interval_sec * 1.5).nonzero()[0] # 1.5 for tolerance
-                        for idx in gap_indices:
-                            gaps.append({
-                                "start": int(ts[idx]),
-                                "end": int(ts[idx+1])
-                            })
+                    # If health scanner already found gaps, use those, else do basic check
+                    if health_metadata:
+                        gaps = health_metadata.get("gaps", [])
+                        health_score = health_metadata.get("health_score", 0)
+                    else:
+                        health_score = None
+                        gaps = []
+                        # Basic check if sidecar doesn't exist
+                        expected_count = (end_ts - start_ts) // interval_sec + 1
+                        if len(ts) < expected_count:
+                            diffs = ts[1:] - ts[:-1]
+                            gap_indices = (diffs > interval_sec * 1.5).nonzero()[0]
+                            for idx in gap_indices:
+                                gaps.append({"start": int(ts[idx]), "end": int(ts[idx+1])})
                     
                     files.append({
                         "file": f.name,
                         "count": len(df),
                         "start": start_ts,
                         "end": end_ts,
-                        "holes": gaps
+                        "holes": gaps,
+                        "health": health_score,
+                        "health_details": health_metadata
                     })
             except:
                 continue
@@ -130,7 +140,14 @@ async def sync_candles(backtesting_config: BacktestingConfig):
     except Exception as e:
         return {"error": str(e)}
 
-@router.post("/candles/batch-sync")
+@router.post("/candles/health-scan")
+async def scan_candle_health(filename: str):
+    """Triggers a full health scan for a specific candle file."""
+    try:
+        result = guardian.run_health_scan(filename)
+        return result
+    except Exception as e:
+        return {"error": str(e)}
 async def batch_sync_candles(batch_configs: list[BacktestingConfig]):
     """
     Smart rate-limited parallel sync of multiple trading pairs' candle data.

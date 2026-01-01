@@ -90,14 +90,19 @@ if sync_top10:
     status_table = st.empty()
     
     # Track status for each coin
-    coin_status = {pair: {"status": "⏳ Waiting...", "rows": "-"} for pair in TOP_10_PAIRS}
+    coin_status = {pair: {"status": "⏳ Waiting...", "rows": "-", "health": "-"} for pair in TOP_10_PAIRS}
     progress_tracker = [0]
     total = len(TOP_10_PAIRS)
     
     def update_display():
         """Update the status table."""
         df_status = pd.DataFrame([
-            {"Coin": pair, "Status": info["status"], "Rows": info["rows"]}
+            {
+                "Coin": pair, 
+                "Status": info["status"], 
+                "Rows": info["rows"],
+                "Health Score": info["health"]
+            }
             for pair, info in coin_status.items()
         ])
         status_table.dataframe(df_status, use_container_width=True, hide_index=True)
@@ -140,6 +145,15 @@ if sync_top10:
             # Check if we have this file in cache
             filename = f"{c_val}_{pair}_{i_val}.csv"
             file_cache = cached_files.get(filename)
+            
+            # Initial health display
+            if file_cache and file_cache.get("health") is not None:
+                score = file_cache["health"]
+                icon = "🟢" if score > 80 else "🟡" if score > 50 else "🔴"
+                coin_status[pair]["health"] = f"{icon} {score}"
+            elif file_cache:
+                coin_status[pair]["health"] = "🔍 Not Scanned"
+            update_display()
             
             # Identify Gaps
             gaps = []
@@ -275,6 +289,30 @@ if sync_top10:
     success_count = sum(1 for info in coin_status.values() if "✅" in info["status"])
     progress_bar.progress(1.0, text=f"✅ Sync Finished! {success_count}/{total} ready.")
     st.success(f"🎉 全部增量同步完成！成功: {success_count}/{total}")
+    
+    # NEW: Health Scan Integration
+    if st.button("🔍 立即进行全量数据健康体检 (Deep Health Scan)"):
+        with st.status("正在进行深度数据校验...", expanded=True) as status:
+            for pair in TOP_10_PAIRS:
+                filename = f"{selected_connector}_{pair}_{selected_interval}.csv"
+                status.write(f"正在扫描 {pair}...")
+                try:
+                    # Using raw request to our new endpoint
+                    import requests
+                    scan_url = f"{api_url}/backtesting/candles/health-scan?filename={filename}"
+                    res = requests.post(scan_url, auth=("admin", "admin")).json()
+                    
+                    if "health_score" in res:
+                        score = res["health_score"]
+                        icon = "🟢" if score > 80 else "🟡" if score > 50 else "🔴"
+                        coin_status[pair]["health"] = f"{icon} {score}"
+                        status.write(f"✅ {pair} 扫描完成，得分: {score}")
+                    else:
+                        status.write(f"❌ {pair} 扫描失败: {res.get('error', 'Unknown error')}")
+                except Exception as e:
+                    status.write(f"❌ {pair} 连接错误: {str(e)}")
+                update_display()
+            status.update(label="✅ 全量健康体检完成！", state="complete")
 
 
 
