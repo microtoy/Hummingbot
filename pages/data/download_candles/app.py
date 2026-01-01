@@ -104,6 +104,10 @@ if sync_top10:
     
     update_display()
     
+    # Capture current selections to ensure they are available in the async loop
+    selected_connector = connector
+    selected_interval = interval
+    
     # Run syncs in parallel with asyncio + independent session (for real-time UI updates)
     import asyncio
     import aiohttp
@@ -120,14 +124,11 @@ if sync_top10:
     except Exception:
         pass
 
-    # Semaphore for concurrency
-    semaphore = asyncio.Semaphore(3)
-
-    async def sync_single_coin(session: aiohttp.ClientSession, pair: str, connector: str, interval: str):
+    async def sync_single_coin(session: aiohttp.ClientSession, pair: str, sem: asyncio.Semaphore, c_val: str, i_val: str):
         """Sync a single coin async with live status updates using Chunked Requests."""
         try:
             # Wait for slot
-            async with semaphore:
+            async with sem:
                 coin_status[pair]["status"] = "🚀 Starting..."
                 update_display()
                 
@@ -159,11 +160,11 @@ if sync_top10:
                     payload = {
                         "start_time": current_start,
                         "end_time": current_end,
-                        "backtesting_resolution": interval,
+                        "backtesting_resolution": i_val,
                         "trade_cost": 0.0006,
                         "config": {
                             "controller_name": "Generic",
-                            "connector_name": connector,
+                            "connector_name": c_val,
                             "trading_pair": pair,
                             "candles_config": []
                         }
@@ -173,8 +174,6 @@ if sync_top10:
                         if response.status == 200:
                             result = await response.json()
                             if result.get("status") == "success":
-                                # The backend returns the TOTAL row count in the file
-                                # Updating this in real-time shows the file "growing"
                                 last_rows = result.get("rows", 0)
                                 coin_status[pair]["rows"] = f"{last_rows:,} 📈"
                             else:
@@ -187,14 +186,10 @@ if sync_top10:
                             update_display()
                             return
                     
-                    # Move to next chunk
                     current_start = current_end
                 
-                # Done
                 coin_status[pair]["status"] = "✅ Done"
                 coin_status[pair]["rows"] = f"{last_rows:,}"
-                
-                # Global progress
                 progress_tracker[0] += 1
                 progress_bar.progress(progress_tracker[0] / total, text=f"Completed {progress_tracker[0]}/{total} coins")
                 update_display()
@@ -204,9 +199,10 @@ if sync_top10:
             update_display()
 
     async def run_parallel_sync():
+        sem = asyncio.Semaphore(3) # Create inside loop
         timeout = aiohttp.ClientTimeout(total=600)
         async with aiohttp.ClientSession(auth=api_auth, timeout=timeout) as session:
-            tasks = [sync_single_coin(session, pair, connector, interval) for pair in TOP_10_PAIRS]
+            tasks = [sync_single_coin(session, pair, sem, selected_connector, selected_interval) for pair in TOP_10_PAIRS]
             await asyncio.gather(*tasks)
 
     # Run the async loop
