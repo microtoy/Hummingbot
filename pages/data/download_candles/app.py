@@ -107,12 +107,24 @@ if sync_top10:
     # Run syncs in parallel with ThreadPoolExecutor (max 3 concurrent)
     # Use 'requests' library directly to avoid asyncio event loop conflicts in threads
     import requests
+    import os
     
-    def sync_single_coin(pair: str):
+    # 1. Extract config in MAIN THREAD to avoid accessing client object in threads
+    api_url = "http://hummingbot-api:8000"  # Default internal URL
+    api_auth = ("admin", "admin")
+    
+    try:
+        if hasattr(backend_api_client, "base_url"):
+            api_url = backend_api_client.base_url
+        if hasattr(backend_api_client, "auth") and backend_api_client.auth:
+            api_auth = (backend_api_client.auth.login, backend_api_client.auth.password)
+    except Exception:
+        pass # Fallback to defaults if any access fails
+    
+    # Define worker function that ONLY uses passed arguments
+    def sync_single_coin(pair: str, base_url: str, auth: tuple):
         """Sync a single coin (runs in thread)."""
         try:
-            coin_status[pair]["status"] = "🔄 Syncing..."
-            
             # Construct payload manually since we bypass the client
             payload = {
                 "start_time": int(start_datetime.timestamp()),
@@ -127,16 +139,9 @@ if sync_top10:
                 }
             }
             
-            # Use basic auth from client if available, or assume default admin/admin
-            auth = None
-            if hasattr(backend_api_client, "auth") and backend_api_client.auth:
-                # aiohttp.BasicAuth -> (login, password)
-                auth = (backend_api_client.auth.login, backend_api_client.auth.password)
-            else:
-                auth = ("admin", "admin")
-                
-            url = f"{backend_api_client.base_url}/backtesting/candles/sync"
+            url = f"{base_url}/backtesting/candles/sync"
             
+            # Use independent requests session inside thread
             response = requests.post(url, json=payload, auth=auth, timeout=300)
             
             if response.status_code == 200:
@@ -153,7 +158,8 @@ if sync_top10:
             return {"pair": pair, "status": f"❌ {str(e)[:25]}...", "rows": "-"}
     
     with ThreadPoolExecutor(max_workers=3) as executor:
-        futures = {executor.submit(sync_single_coin, pair): pair for pair in TOP_10_PAIRS}
+        # Pass static config to each task
+        futures = {executor.submit(sync_single_coin, pair, api_url, api_auth): pair for pair in TOP_10_PAIRS}
         
         for future in as_completed(futures):
             result = future.result()
