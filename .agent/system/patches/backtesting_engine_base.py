@@ -40,6 +40,7 @@ class BacktestingEngineBase:
         self.backtesting_data_provider = BacktestingDataProvider(connectors={})
         self.position_executor_simulator = PositionExecutorSimulator()
         self.dca_executor_simulator = DCAExecutorSimulator()
+        self.allow_download = True  # Milestone Fix: Enable download by default to support 1h indicators
 
     @classmethod
     def load_controller_config(cls,
@@ -163,9 +164,53 @@ class BacktestingEngineBase:
         # We use a 60s buffer from "now" to ensure the latest candle is likely closed.
         effective_needed_end = min(needed_end, current_ts - 60)
         
-        # CACHE-ONLY MODE: Never request from network, only use local cache
+        # CACHE CHECK
         if not cache_file.exists():
-            raise ValueError(f"❌ [NO CACHE] {filename} does not exist. Please sync data first via 'Download Candles' page.")
+            if not self.allow_download:
+                raise ValueError(f"❌ [NO CACHE] {filename} does not exist. Please sync data first via 'Download Candles' page.")
+            print(f"📥 [MISSING CACHE] {filename} not found. Attempting download...")
+        elif self.allow_download:
+            # Check for range sufficiency even if file exists
+            try:
+                # Fast check for first and last line
+                with open(cache_file, 'rb') as f:
+                    header = f.readline()
+                    first_line = f.readline()
+                    f.seek(-1024, 2)
+                    last_lines = f.read().splitlines()
+                    
+                    if first_line and last_lines:
+                        m_ts = int(float(first_line.split(b',')[0]))
+                        x_ts = int(float(last_lines[-1].split(b',')[0]))
+                        
+                        if m_ts <= needed_start and x_ts >= effective_needed_end - 86400:
+                             # PERFECT CACHE HIT
+                             full_df = pd.read_csv(cache_file)
+                             result_df = full_df[(full_df["timestamp"] >= needed_start) & (full_df["timestamp"] <= needed_end)].copy()
+                             key = self.backtesting_data_provider._generate_candle_feed_key(config)
+                             self.backtesting_data_provider.candles_feeds[key] = result_df
+                             return result_df
+            except:
+                pass # Fallback to standard download/sync logic below
+
+        # DOWNLOAD / SYNC FALLBACK
+        if self.allow_download:
+            try:
+                print(f"📥 [SYNCING] Fetching {config.trading_pair} ({config.interval}) for backtest...")
+                merged_df = await self.backtesting_data_provider.get_candles_feed(config)
+                if merged_df is not None and not merged_df.empty:
+                    merged_df.to_csv(cache_file, index=False)
+                    result_df = merged_df[(merged_df["timestamp"] >= needed_start) & (merged_df["timestamp"] <= needed_end)].copy()
+                    key = self.backtesting_data_provider._generate_candle_feed_key(config)
+                    self.backtesting_data_provider.candles_feeds[key] = result_df
+                    return result_df
+            except Exception as e:
+                if "NO_LOG" not in str(e):
+                    print(f"❌ [DOWNLOAD FAILED] {filename}: {e}")
+        
+        # Final failure if no download allowed or failed
+        if not cache_file.exists():
+            raise ValueError(f"❌ [DOWNLOAD REQUIRED] {filename} is missing and could not be fetched.")
         
         try:
             full_df = pd.read_csv(cache_file)
