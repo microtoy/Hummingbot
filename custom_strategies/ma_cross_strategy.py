@@ -57,7 +57,8 @@ class MACrossStrategyController(DirectionalTradingControllerBase):
         """
         # Use the first candles config interval
         interval = self.config.candles_config[0].interval if self.config.candles_config else "1h"
-        candles = self.market_data_provider.get_candles_df(self.config.connector_name, self.config.trading_pair, interval)
+        # Use .copy() to avoid SettingWithCopyWarning
+        candles = self.market_data_provider.get_candles_df(self.config.connector_name, self.config.trading_pair, interval).copy()
         
         if len(candles) < self.config.slow_ma:
             candles["signal"] = 0
