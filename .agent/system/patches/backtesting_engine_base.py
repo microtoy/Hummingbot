@@ -140,7 +140,7 @@ class BacktestingEngineBase:
             await self._get_candles_with_cache(config)
 
     async def _get_candles_with_cache(self, config: CandlesConfig):
-        """Helper to get candles with simplified cumulative caching."""
+        """Helper to get candles with robust cumulative caching."""
         import hummingbot
         from hummingbot.data_feed.candles_feed.candles_base import CandlesBase
 
@@ -160,28 +160,34 @@ class BacktestingEngineBase:
             try:
                 full_df = pd.read_csv(cache_file)
                 if not full_df.empty:
-                    min_ts = full_df["timestamp"].min()
-                    max_ts = full_df["timestamp"].max()
+                    min_ts = int(full_df["timestamp"].min())
+                    max_ts = int(full_df["timestamp"].max())
                     
-                    # 1. OPTIMIZED HIT: If local data FULLY covers the requested period
-                    if min_ts <= needed_start and max_ts >= needed_end:
-                        print(f"🚀 [CACHE HIT] Using local data for {config.trading_pair}")
+                    # 1. TOLERANT HIT CHECK
+                    # End time tolerance: if user asks for 'now' but we only have up to 1h ago, it's often fine.
+                    # Or if the gap is very small (e.g. 1 minute drift).
+                    start_covered = (min_ts <= needed_start)
+                    # Allow 3600s (1h) of gap at the end to avoid constant redownloads for 'live-edge' backtests
+                    end_covered = (max_ts >= needed_end - 3600)
+                    
+                    if start_covered and end_covered:
+                        print(f"✅ [CACHE HIT] {filename} covers {min_ts} to {max_ts} (Need {needed_start} to {needed_end})")
                         result_df = full_df[(full_df["timestamp"] >= needed_start) & (full_df["timestamp"] <= needed_end)].copy()
                         key = self.backtesting_data_provider._generate_candle_feed_key(config)
                         self.backtesting_data_provider.candles_feeds[key] = result_df
                         return result_df
                     else:
-                        print(f"🔄 [CACHE PARTIAL] Local covers {min_ts}-{max_ts}, but need {needed_start}-{needed_end}")
+                        reason = "START missing" if not start_covered else "END missing"
+                        print(f"🔄 [CACHE PARTIAL] {filename} ({min_ts}-{max_ts}) vs Target ({needed_start}-{needed_end}). Reason: {reason}")
             except Exception as e:
                 print(f"⚠️ [CACHE LOAD ERROR] {e}")
 
-        # 2. DOWNLOAD missing/full data
-        print(f"📥 [DOWNLOADING] Fetching {config.trading_pair} ({needed_start} to {needed_end})...")
+        # 2. DOWNLOAD & MERGE
+        print(f"📥 [DOWNLOADING] Fetching delta for {config.trading_pair} {config.interval}...")
         new_df = await self.backtesting_data_provider.get_candles_feed(config)
         
         if new_df is not None and not new_df.empty:
             if not full_df.empty:
-                # Merge and clean up
                 full_df = pd.concat([full_df, new_df])
                 full_df.drop_duplicates(subset=["timestamp"], inplace=True)
                 full_df.sort_values("timestamp", inplace=True)
@@ -189,13 +195,12 @@ class BacktestingEngineBase:
                 full_df = new_df
                 
             try:
-                # Save the cumulative file
                 full_df.to_csv(cache_file, index=False)
-                print(f"💾 [CUMULATIVE SAVE] {filename} now has {len(full_df)} rows")
+                print(f"💾 [CACHE UPDATED] {filename} grew to {len(full_df)} rows")
             except Exception as e:
                 print(f"❌ [SAVE FAILED] {e}")
             
-            # Return sliced result
+            # Return final sliced result
             result_df = full_df[(full_df["timestamp"] >= needed_start) & (full_df["timestamp"] <= needed_end)].copy()
             key = self.backtesting_data_provider._generate_candle_feed_key(config)
             self.backtesting_data_provider.candles_feeds[key] = result_df

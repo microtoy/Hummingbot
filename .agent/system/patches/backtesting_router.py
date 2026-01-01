@@ -62,10 +62,10 @@ async def sync_candles(backtesting_config: BacktestingConfig):
                 controllers_module=settings.app.controllers_module
             )
             
-        # 2. Pad the start time with buffer (Standard 1000 candles)
+        # 2. Pad the start time with buffer (Generous 2000 candles to ensure hits)
         from hummingbot.data_feed.candles_feed.candles_base import CandlesBase
         interval = backtesting_config.backtesting_resolution
-        buffer_seconds = 1000 * CandlesBase.interval_to_seconds.get(interval, 60)
+        buffer_seconds = 2000 * CandlesBase.interval_to_seconds.get(interval, 60)
         padded_start = int(backtesting_config.start_time - buffer_seconds)
         
         # 3. Trigger initialization (which hits the smart cache in engine)
