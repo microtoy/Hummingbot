@@ -132,68 +132,48 @@ async def run_backtesting(backtesting_config: BacktestingConfig):
 @router.post("/batch-run")
 async def batch_run_backtesting(batch_configs: list[BacktestingConfig]):
     """
-    Run multiple backtesting simulations in parallel.
-    Uses ProcessPoolExecutor to utilize all CPU cores (perfect for M1 Max).
+    Run multiple backtesting simulations sequentially (optimized for Jump-Ahead speed).
+    Each single-coin backtest is now ~3ms, so 10 coins = ~30-50ms total.
     """
-    import asyncio
-    from concurrent.futures import ProcessPoolExecutor
+    results = []
+    for config in batch_configs:
+        try:
+            if isinstance(config.config, str):
+                controller_config = backtesting_engine.get_controller_config_instance_from_yml(
+                    config_path=config.config,
+                    controllers_conf_dir_path=settings.app.controllers_path,
+                    controllers_module=settings.app.controllers_module
+                )
+            else:
+                controller_config = backtesting_engine.get_controller_config_instance_from_dict(
+                    config_data=config.config,
+                    controllers_module=settings.app.controllers_module
+                )
+            
+            bt_result = await backtesting_engine.run_backtesting(
+                controller_config=controller_config,
+                trade_cost=config.trade_cost,
+                start=int(config.start_time),
+                end=int(config.end_time),
+                backtesting_resolution=config.backtesting_resolution
+            )
+            
+            summary = bt_result["results"]
+            results.append({
+                "trading_pair": controller_config.trading_pair,
+                "net_pnl": summary.get("net_pnl", 0),
+                "net_pnl_quote": summary.get("net_pnl_quote", 0),
+                "accuracy": summary.get("accuracy", 0),
+                "sharpe_ratio": summary.get("sharpe_ratio", 0) or 0,
+                "max_drawdown_pct": summary.get("max_drawdown_pct", 0),
+                "profit_factor": summary.get("profit_factor", 0),
+                "total_positions": summary.get("total_positions", 0),
+                "performance": bt_result.get("performance", {})
+            })
+        except Exception as e:
+            results.append({
+                "trading_pair": config.config.get("trading_pair", "Unknown") if isinstance(config.config, dict) else "Unknown",
+                "error": str(e)
+            })
     
-    # Use a chunk of cores (up to 8 to avoid total machine hang)
-    max_workers = min(len(batch_configs), 8)
-    
-    loop = asyncio.get_running_loop()
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        # Note: We need to pass dictionaries to the executor because Pydantic models 
-        # can sometimes have issues with complex nested pickling in some environments.
-        tasks = [
-            loop.run_in_executor(executor, sync_run_backtest, config.dict())
-            for config in batch_configs
-        ]
-        results = await asyncio.gather(*tasks)
-        
     return {"results": results}
-
-def sync_run_backtest(config_dict: dict):
-    """Sync wrapper for backtesting to be run in a separate process."""
-    import asyncio
-    # Initialize a fresh engine in each process
-    engine = BacktestingEngineBase()
-    
-    # We need to run the async backtesting in a new loop for this process
-    async def _run():
-        config = BacktestingConfig(**config_dict)
-        if isinstance(config.config, str):
-            controller_config = engine.get_controller_config_instance_from_yml(
-                config_path=config.config,
-                controllers_conf_dir_path=settings.app.controllers_path,
-                controllers_module=settings.app.controllers_module
-            )
-        else:
-            controller_config = engine.get_controller_config_instance_from_dict(
-                config_data=config.config,
-                controllers_module=settings.app.controllers_module
-            )
-        
-        results = await engine.run_backtesting(
-            controller_config=controller_config,
-            trade_cost=config.trade_cost,
-            start=int(config.start_time),
-            end=int(config.end_time),
-            backtesting_resolution=config.backtesting_resolution
-        )
-        
-        # Simplify results for batch transport
-        summary = results["results"]
-        return {
-            "trading_pair": controller_config.trading_pair,
-            "net_pnl": summary.get("net_pnl", 0),
-            "net_pnl_quote": summary.get("net_pnl_quote", 0),
-            "accuracy": summary.get("accuracy", 0),
-            "sharpe_ratio": summary.get("sharpe_ratio", 0),
-            "max_drawdown_pct": summary.get("max_drawdown_pct", 0),
-            "profit_factor": summary.get("profit_factor", 0),
-            "total_positions": summary.get("total_positions", 0),
-            "performance": results.get("performance", {})
-        }
-        
-    return asyncio.run(_run())
