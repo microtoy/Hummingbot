@@ -43,6 +43,9 @@ async def sync_candles(backtesting_config: BacktestingConfig):
     """Prefetch and cache candles with automatic buffer padding."""
     try:
         from types import SimpleNamespace
+        from pathlib import Path
+        import hummingbot
+        
         # 1. Determine controller config
         if isinstance(backtesting_config.config, dict) and "connector_name" in backtesting_config.config:
             controller_config = SimpleNamespace(
@@ -76,7 +79,22 @@ async def sync_candles(backtesting_config: BacktestingConfig):
         
         await backtesting_engine.initialize_backtesting_data_provider()
         
-        return {"status": "success", "message": f"Synced with {buffer_seconds/3600:.1f}h buffer padding"}
+        # 4. Get row count from cache file
+        cache_dir = Path(hummingbot.data_path()) / "candles"
+        filename = f"{controller_config.connector_name}_{controller_config.trading_pair}_{interval}.csv"
+        cache_file = cache_dir / filename
+        
+        row_count = 0
+        if cache_file.exists():
+            import pandas as pd
+            df = pd.read_csv(cache_file)
+            row_count = len(df)
+        
+        return {
+            "status": "success", 
+            "message": f"Synced {row_count:,} rows ({buffer_seconds/3600:.1f}h buffer)",
+            "rows": row_count
+        }
     except Exception as e:
         return {"error": str(e)}
 
