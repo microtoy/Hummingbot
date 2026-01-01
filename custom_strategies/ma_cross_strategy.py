@@ -49,9 +49,14 @@ class MACrossStrategyController(DirectionalTradingControllerBase):
     Implementation of an MA Cross controller with Triple Barrier and optional Compounding.
     """
     def __init__(self, config: MACrossStrategyConfig, *args, **kwargs):
+        # Determine interval from config (e.g. 1h for signals)
+        interval = "1h" # Default for this strategy
+        if config.candles_config:
+            interval = config.candles_config[0].interval
+            
         if not config.candles_config:
             config.candles_config = [
-                CandlesConfig(connector=config.connector_name, trading_pair=config.trading_pair, interval="1h", max_records=500)
+                CandlesConfig(connector=config.connector_name, trading_pair=config.trading_pair, interval=interval, max_records=500)
             ]
         
         super().__init__(config, *args, **kwargs)

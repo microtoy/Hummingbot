@@ -40,7 +40,7 @@ class BacktestingEngineBase:
         self.backtesting_data_provider = BacktestingDataProvider(connectors={})
         self.position_executor_simulator = PositionExecutorSimulator()
         self.dca_executor_simulator = DCAExecutorSimulator()
-        self.allow_download = False  # Default: Cache-Only Mode
+        self.allow_download = True  # Enabled: Allow fetching missing data
 
     @classmethod
     def get_controller_config_instance_from_dict(cls, config_data: Dict, controllers_module: str = None) -> ControllerConfigBase:
@@ -69,14 +69,17 @@ class BacktestingEngineBase:
 
         config_class = None
         for name, obj in inspect.getmembers(module):
-            if inspect.isclass(obj) and issubclass(obj, ControllerConfigBase) and obj is not ControllerConfigBase:
-                if issubclass(obj, (DirectionalTradingControllerConfigBase, MarketMakingControllerConfigBase)):
-                    config_class = obj
-                    break
+            if inspect.isclass(obj) and issubclass(obj, ControllerConfigBase):
+                # Skip base classes and only pick classes defined in the actual strategy module
+                if obj in (ControllerConfigBase, DirectionalTradingControllerConfigBase, MarketMakingControllerConfigBase):
+                    continue
+                if obj.__module__ != module.__name__:
+                    continue
                 config_class = obj
+                break
 
         if not config_class:
-            raise InvalidController(f"No configuration class found in module for {controller_name}")
+            raise InvalidController(f"No specific configuration class found in module for {controller_name}")
 
         return config_class(**config_data)
 
@@ -88,6 +91,62 @@ class BacktestingEngineBase:
         with open(path, 'r') as f:
             config_data = yaml.safe_load(f)
         return cls.get_controller_config_instance_from_dict(config_data=config_data, controllers_module=controllers_module)
+
+    def get_controller_class(self, controller_name: str):
+        if controller_name in self.__controller_class_cache:
+            return self.__controller_class_cache[controller_name]
+        
+        # Search paths (custom first)
+        potential_modules = [
+            f"bots.controllers.custom.{controller_name}",
+            f"bots.controllers.{controller_name}",
+            f"hummingbot.strategy_v2.controllers.{controller_name}"
+        ]
+        
+        for module_path in potential_modules:
+            try:
+                module = importlib.import_module(module_path)
+                for name, obj in inspect.getmembers(module):
+                    if inspect.isclass(obj) and issubclass(obj, ControllerBase) and obj is not ControllerBase:
+                        # Ensure we pick the class defined in the module, not an imported one
+                        if obj.__module__ != module.__name__:
+                            continue
+                        self.__controller_class_cache[controller_name] = obj
+                        return obj
+            except ImportError:
+                continue
+        raise InvalidController(f"Controller class for {controller_name} not found.")
+
+    async def run_backtesting(self, controller_config: ControllerConfigBase, trade_cost: float,
+                               start: int, end: int, backtesting_resolution: str):
+        import asyncio
+        self.backtesting_resolution = backtesting_resolution
+        self.backtesting_data_provider.start_time = start
+        self.backtesting_data_provider.end_time = end
+        
+        # Initialize controller with required positional arguments
+        controller_class = self.get_controller_class(controller_config.controller_name)
+        self.controller = controller_class(
+            config=controller_config,
+            market_data_provider=self.backtesting_data_provider,
+            actions_queue=asyncio.Queue()
+        )
+        self.controller.set_leverage = lambda x, y: None  # Mock leverage for backtesting
+        
+        # Load data
+        await self.initialize_backtesting_data_provider()
+        
+        # Trigger controller feature calculation (MAs, Signals)
+        await self.controller.update_processed_data()
+        
+        # Run simulation
+        executors = await self.simulate_execution(trade_cost=trade_cost)
+        
+        return {
+            "results": self.summarize_results(executors),
+            "executors": executors,
+            "processed_data": self.controller.processed_data
+        }
 
     async def initialize_backtesting_data_provider(self):
         # Main candle feed
