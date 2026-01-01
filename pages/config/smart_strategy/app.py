@@ -144,14 +144,14 @@ def safe_backtesting_section(inputs, backend_api_client):
         end_ts = int(datetime.combine(end_date, datetime.max.time()).timestamp())  # Full day
     
     if bt_mode == "🚀 Batch Comparison":
-        # Multi-coin batch mode - Top 20 by market cap (as of 2024)
+        # Multi-coin batch mode - Top 20 by market cap (Jan 2026, excluding stablecoins)
         import os
         cpu_cores = os.cpu_count() or 8
         top_pairs = [
-            "BTC-USDT", "ETH-USDT", "BNB-USDT", "SOL-USDT", "XRP-USDT",
-            "DOGE-USDT", "ADA-USDT", "AVAX-USDT", "TRX-USDT", "DOT-USDT",
-            "LINK-USDT", "MATIC-USDT", "TON-USDT", "SHIB-USDT", "LTC-USDT",
-            "BCH-USDT", "UNI-USDT", "ATOM-USDT", "XLM-USDT", "ETC-USDT"
+            "BTC-USDT", "ETH-USDT", "BNB-USDT", "XRP-USDT", "SOL-USDT",
+            "TRX-USDT", "DOGE-USDT", "ADA-USDT", "AVAX-USDT", "LINK-USDT",
+            "DOT-USDT", "SHIB-USDT", "LTC-USDT", "BCH-USDT", "UNI-USDT",
+            "ATOM-USDT", "XLM-USDT", "ETC-USDT", "AAVE-USDT", "FIL-USDT"
         ]
         st.caption(f"🖥️ Detected {cpu_cores} CPU cores. Selecting Top {min(cpu_cores, len(top_pairs))} coins by market cap.")
         selected_pairs = st.multiselect("Select Trading Pairs to Compare", options=top_pairs, default=top_pairs[:min(cpu_cores, len(top_pairs))], key="bt_pairs")
