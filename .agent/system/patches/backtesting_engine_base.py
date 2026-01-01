@@ -241,33 +241,56 @@ class BacktestingEngineBase:
     async def simulate_execution(self, trade_cost: float) -> list:
         """
         Simulates market making strategy over historical data, considering trading costs.
-
-        Args:
-            trade_cost (float): The cost per trade.
-
-        Returns:
-            List[ExecutorInfo]: List of executor information objects detailing the simulation results.
         """
         processed_features = self.prepare_market_data()
         self.active_executor_simulations: List[ExecutorSimulation] = []
         self.stopped_executors_info: List[ExecutorInfo] = []
         
-        # Optimization: iterrows() is very slow. Use to_dict('records') for faster iteration.
-        records = processed_features.to_dict('records')
-        for i, row in enumerate(records):
-            await self.update_state(row)
+        # Pre-calculate connector key to avoid string ops in loop
+        connector_key = f"{self.controller.config.connector_name}_{self.controller.config.trading_pair}"
+        
+        # Optimization: itertuples() is significantly faster than to_dict('records')
+        # We access values by index which is much faster than dictionary access.
+        for row in processed_features.itertuples(index=False):
+            # 1. Update State (Inlined for speed)
+            current_ts = row.timestamp
+            # Use pre-calculated Decimal to squeeze performance
+            self.controller.market_data_provider.prices = {connector_key: row.close_bt_decimal}
+            self.controller.market_data_provider._time = current_ts
+            self.controller.processed_data.update(row._asdict()) # Still need dict for controller logic for now
+            
+            # 2. Update executors and collect finished ones
+            active_executors_info = []
+            simulations_to_remove = []
+            for executor in self.active_executor_simulations:
+                executor_info = executor.get_executor_info_at_timestamp(current_ts)
+                if executor_info.status == RunnableStatus.TERMINATED:
+                    self.stopped_executors_info.append(executor_info)
+                    simulations_to_remove.append(executor.config.id)
+                else:
+                    active_executors_info.append(executor_info)
+            
+            if simulations_to_remove:
+                self.active_executor_simulations = [es for es in self.active_executor_simulations if es.config.id not in simulations_to_remove]
+            
+            # Update controller info ONLY WITH ACTIVE ones (Crucial speedup)
+            self.controller.executors_info = active_executors_info
+            
+            # 3. Determine Actions
             for action in self.controller.determine_executor_actions():
                 if isinstance(action, CreateExecutorAction):
-                    # For optimization, we slice the records instead of the dataframe
-                    # Note: simulate_executor expects a dataframe slice, but we can pass records if we update it
-                    # However, for minimum change, we'll keep the dataframe slice for now but optimized iteration
-                    executor_simulation = self.simulate_executor(action.executor_config, processed_features.iloc[i:], trade_cost)
+                    # For optimization, we slice the dataframe only when needed
+                    # Find current index in processed_features to avoid iloc overhead
+                    # Note: This is still a bit slow but only happens on trade creation
+                    current_idx = processed_features.index[processed_features['timestamp'] == current_ts][0]
+                    executor_simulation = self.simulate_executor(action.executor_config, processed_features.iloc[current_idx:], trade_cost)
                     if executor_simulation is not None and executor_simulation.close_type != CloseType.FAILED:
                         self.manage_active_executors(executor_simulation)
                 elif isinstance(action, StopExecutorAction):
-                    self.handle_stop_action(action, row["timestamp"])
+                    self.handle_stop_action(action, current_ts)
 
-        return self.controller.executors_info
+        # FINAL MERGE: Combine active and stopped only at the very end
+        return self.controller.executors_info + self.stopped_executors_info
 
     async def update_state(self, row):
         key = f"{self.controller.config.connector_name}_{self.controller.config.trading_pair}"
@@ -328,6 +351,10 @@ class BacktestingEngineBase:
         backtesting_candles["low"] = backtesting_candles["low_bt"]
         backtesting_candles["close"] = backtesting_candles["close_bt"]
         backtesting_candles["volume"] = backtesting_candles["volume_bt"]
+        
+        # Pre-convert close to Decimal for high-speed simulation loop
+        backtesting_candles["close_bt_decimal"] = backtesting_candles["close_bt"].apply(Decimal)
+        
         backtesting_candles.dropna(inplace=True)
         self.controller.processed_data["features"] = backtesting_candles
         return backtesting_candles
