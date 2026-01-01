@@ -86,9 +86,12 @@ async def sync_candles(backtesting_config: BacktestingConfig):
         
         row_count = 0
         if cache_file.exists():
-            import pandas as pd
-            df = pd.read_csv(cache_file)
-            row_count = len(df)
+            try:
+                # Fast binary row count using buffer chunks
+                with open(cache_file, 'rb') as f:
+                    row_count = sum(line.count(b'\n') for line in iter(lambda: f.read(1024 * 1024), b''))
+            except:
+                row_count = -1
         
         return {
             "status": "success", 
@@ -146,9 +149,11 @@ async def batch_sync_candles(batch_configs: list[BacktestingConfig]):
                 cache_file = cache_dir / filename
                 row_count = 0
                 if cache_file.exists():
-                    import pandas as pd
-                    df = pd.read_csv(cache_file)
-                    row_count = len(df)
+                    try:
+                        with open(cache_file, 'rb') as f:
+                            row_count = sum(line.count(b'\n') for line in iter(lambda: f.read(1024 * 1024), b''))
+                    except:
+                        row_count = -1
                 
                 # Short delay between requests
                 await asyncio.sleep(0.2)
