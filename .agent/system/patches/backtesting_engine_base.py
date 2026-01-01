@@ -171,9 +171,11 @@ class BacktestingEngineBase:
                     min_ts = int(full_df["timestamp"].min())
                     max_ts = int(full_df["timestamp"].max())
                     
-                    # 1. PERFECT HIT CHECK (with 5-min tolerance for the end)
-                    if min_ts <= needed_start and max_ts >= effective_needed_end - 300:
-                        print(f"✅ [CACHE HIT] Using local {filename}")
+                    # 1. PERFECT HIT CHECK (with generous 24-hour tolerance for the end)
+                    # If we have data up to at least (requested_end - 24h), we consider it a hit for "live" tests.
+                    # This prevents constant small redownloads when testing near the current date.
+                    if min_ts <= needed_start and max_ts >= effective_needed_end - 86400:
+                        print(f"✅ [CACHE HIT] Using local {filename} (Max TS: {max_ts}, Needed: {effective_needed_end})")
                         result_df = full_df[(full_df["timestamp"] >= needed_start) & (full_df["timestamp"] <= needed_end)].copy()
                         key = self.backtesting_data_provider._generate_candle_feed_key(config)
                         self.backtesting_data_provider.candles_feeds[key] = result_df
