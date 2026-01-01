@@ -27,6 +27,9 @@ try:
 except Exception as e:
     st.sidebar.error("Ready to sync to server.")
 
+# Top 10 coins by market cap (Jan 2026, excluding stablecoins)
+TOP_10_PAIRS = ["BTC-USDT", "ETH-USDT", "BNB-USDT", "XRP-USDT", "SOL-USDT", "TRX-USDT", "DOGE-USDT", "ADA-USDT", "AVAX-USDT", "LINK-USDT"]
+
 c1, c2, c3, c4 = st.columns([2, 2, 2, 1.5])
 with c1:
     connector = st.selectbox("Exchange",
@@ -36,11 +39,12 @@ with c1:
 with c2:
     interval = st.selectbox("Interval", options=["1m", "3m", "5m", "15m", "1h", "4h", "1d", "1s"])
 with c3:
-    start_date = st.date_input("Start Date", value=datetime.now() - timedelta(days=2))
+    start_date = st.date_input("Start Date", value=datetime.now() - timedelta(days=7))
     end_date = st.date_input("End Date", value=datetime.now() - timedelta(days=1))
 with c4:
     get_data_button = st.button("Get Candles! (Browser)")
     sync_to_server = st.button("Sync to Server Cache 🚀")
+    sync_top10 = st.button("🔥 Sync Top 10 Coins")
 
 if sync_to_server:
     start_datetime = datetime.combine(start_date, time.min)
@@ -72,6 +76,36 @@ if sync_to_server:
         else:
             st.success("✅ 数据同步完成 (包括预热 1h 间隔)！")
             st.rerun()
+
+if sync_top10:
+    start_datetime = datetime.combine(start_date, time.min)
+    end_datetime = datetime.combine(end_date, time.max)
+    
+    progress = st.progress(0, text="Preparing to sync Top 10 coins...")
+    success_count = 0
+    
+    for i, pair in enumerate(TOP_10_PAIRS):
+        progress.progress((i + 1) / len(TOP_10_PAIRS), text=f"Syncing {pair}... ({i+1}/{len(TOP_10_PAIRS)})")
+        try:
+            config = {
+                "controller_name": "Generic",
+                "connector_name": connector,
+                "trading_pair": pair,
+                "candles_config": []
+            }
+            backend_api_client.backtesting.sync_candles(
+                start_time=int(start_datetime.timestamp()),
+                end_time=int(end_datetime.timestamp()),
+                backtesting_resolution=interval,
+                config=config
+            )
+            success_count += 1
+        except Exception as e:
+            st.warning(f"⚠️ {pair}: {e}")
+    
+    progress.progress(1.0, text="Done!")
+    st.success(f"✅ Top 10 批量同步完成！成功: {success_count}/{len(TOP_10_PAIRS)}")
+    st.rerun()
 
 if get_data_button:
     start_datetime = datetime.combine(start_date, time.min)
