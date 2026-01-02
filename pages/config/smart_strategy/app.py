@@ -184,85 +184,97 @@ def safe_backtesting_section(inputs, backend_api_client):
                         results = response["results"]
                         st.session_state["batch_results"] = results
                         status.update(label="✅ Batch Complete!", state="complete")
-                        
-                        # Display results INSIDE the status container
-                        df = pd.DataFrame(results)
-                        df_sorted = df.sort_values("net_pnl", ascending=False)
-                        
-                        st.subheader("🏆 Market Leaderboard")
-                        st.dataframe(
-                            df_sorted.style.format({
-                                'net_pnl': '{:.2%}', 'net_pnl_quote': '${:.2f}',
-                                'accuracy': '{:.1%}', 'sharpe_ratio': '{:.2f}',
-                                'profit_factor': '{:.2f}', 'max_drawdown_pct': '{:.2%}'
-                            }),
-                            use_container_width=True, hide_index=True
-                        )
-                        
-                        # Charts
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            fig_pnl = px.bar(df_sorted, x='trading_pair', y='net_pnl', color='net_pnl', color_continuous_scale='RdYlGn', title="Net PnL % by Token")
-                            fig_pnl.update_layout(template="plotly_dark")
-                            st.plotly_chart(fig_pnl, use_container_width=True)
-                        with col2:
-                            fig_scatter = px.scatter(df_sorted, x='accuracy', y='sharpe_ratio', size='total_positions', color='net_pnl', hover_name='trading_pair', title="Risk/Reward Map")
-                            fig_scatter.update_layout(template="plotly_dark")
-                            st.plotly_chart(fig_scatter, use_container_width=True)
-                        
-                        # Summary
-                        s1, s2, s3, s4 = st.columns(4)
-                        s1.metric("Avg PnL %", f"{df['net_pnl'].mean():.2%}")
-                        s2.metric("Total PnL $", f"${df['net_pnl_quote'].sum():,.2f}")
-                        s3.metric("Market Win Rate", f"{(df['net_pnl'] > 0).mean():.1%}")
-                        s4.metric("Best Performer", df_sorted.iloc[0]['trading_pair'])
                     else:
                         st.error("Backend returned empty or error.")
                 except Exception as e:
                     st.error(f"Execution Error: {e}")
         
-        # --- Drill-down Inspection Section ---
+        # --- Persistent Results Display (Outside status) ---
         if "batch_results" in st.session_state and st.session_state["batch_results"]:
-            df_results = pd.DataFrame(st.session_state["batch_results"])
-            st.write("---")
-            st.subheader("🔍 Inspect Detailed Performance")
+            results = st.session_state["batch_results"]
+            df = pd.DataFrame(results)
+            df_sorted = df.sort_values("net_pnl", ascending=False).reset_index(drop=True)
             
-            with st.container(border=True):
-                inspect_pair = st.selectbox("Select Trading Pair for Detail View", 
-                                             options=df_results["trading_pair"].tolist(), 
-                                             key="inspect_pair_select")
+            st.write("---")
+            st.subheader("🏆 Market Leaderboard")
+            st.caption("💡 Click a **Trading Pair** to view its detailed chart below")
+            
+            # Custom Interactive Table using Columns
+            # Header
+            h1, h2, h3, h4, h5, h6 = st.columns([1.5, 1, 1, 1, 1, 1])
+            h1.write("**Trading Pair**")
+            h2.write("**Net PnL %**")
+            h3.write("**PnL ($)**")
+            h4.write("**Accuracy**")
+            h5.write("**Max DD**")
+            h6.write("**Sharpe**")
+            
+            # Initialize selection in session state if not present
+            if "selected_batch_pair" not in st.session_state:
+                st.session_state["selected_batch_pair"] = df_sorted.iloc[0]["trading_pair"]
+
+            # Rows
+            for idx, row in df_sorted.iterrows():
+                r1, r2, r3, r4, r5, r6 = st.columns([1.5, 1, 1, 1, 1, 1])
+                # Trading pair as a button to select
+                if r1.button(row["trading_pair"], key=f"select_{row['trading_pair']}", use_container_width=True, 
+                            type="primary" if st.session_state["selected_batch_pair"] == row["trading_pair"] else "secondary"):
+                    st.session_state["selected_batch_pair"] = row["trading_pair"]
+                    st.rerun()
                 
-                # Instant drill-down using data already returned by batch_run
-                selected_result = next((r for r in st.session_state["batch_results"] if r["trading_pair"] == inspect_pair), None)
+                # Metrics with coloring
+                pnl_color = "green" if row["net_pnl"] > 0 else "red"
+                r2.markdown(f":{pnl_color}[{row['net_pnl']:.2%}]")
+                r3.write(f"${row['net_pnl_quote']:.2f}")
+                r4.write(f"{row['accuracy']:.1%}")
+                r5.markdown(f":red[{row['max_drawdown_pct']:.2%}]")
+                r6.write(f"{row['sharpe_ratio']:.2f}")
+
+            # Summary Metrics for the whole batch
+            st.write("### Batch Summary")
+            s1, s2, s3, s4 = st.columns(4)
+            s1.metric("Avg PnL %", f"{df['net_pnl'].mean():.2%}")
+            s2.metric("Total PnL $", f"${df['net_pnl_quote'].sum():,.2f}")
+            s3.metric("Market Win Rate", f"{(df['net_pnl'] > 0).mean():.1%}")
+            if not df_sorted.empty:
+                s4.metric("Best Performer", df_sorted.iloc[0]['trading_pair'])
+
+            # Handle Detail View for selected pair
+            inspect_pair = st.session_state["selected_batch_pair"]
+            full_item = next((r for r in results if r["trading_pair"] == inspect_pair), None)
+            
+            if full_item:
+                st.write("---")
+                st.subheader(f"📈 Detailed View: {full_item['trading_pair']}")
                 
-                if selected_result:
-                    # Display metrics and figure immediately
-                    render_backtesting_metrics({
-                        "net_pnl": selected_result["net_pnl"],
-                        "net_pnl_quote": selected_result["net_pnl_quote"],
-                        "accuracy": selected_result["accuracy"],
-                        "sharpe_ratio": selected_result["sharpe_ratio"],
-                        "max_drawdown_pct": selected_result["max_drawdown_pct"],
-                        "profit_factor": selected_result["profit_factor"],
-                        "total_positions": selected_result["total_positions"]
-                    })
+                # Consistently render all metrics using the shared components
+                render_backtesting_metrics(full_item["results"])
+                
+                if "processed_data" in full_item and full_item["processed_data"]:
+                    fig = create_backtesting_figure(
+                        df=full_item["processed_data"], 
+                        executors=full_item["executors"], 
+                        config=full_item.get("config", inputs)
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
                     
-                    if "processed_data" in selected_result and selected_result["processed_data"]:
-                        fig = create_backtesting_figure(
-                            df=selected_result["processed_data"], 
-                            executors=selected_result["executors"], 
-                            config=selected_result.get("config", inputs)
-                        )
-                        st.plotly_chart(fig, use_container_width=True)
-                        
-                        # Show accuracy and close types if available in results summary
-                        # (Note: full close_types might need specific mapping if not in top summary)
-                        render_accuracy_metrics({
-                            "accuracy": selected_result["accuracy"],
-                            "total_positions": selected_result["total_positions"]
-                        })
-                    else:
-                        st.warning(f"No chart data available for {inspect_pair}")
+                    render_accuracy_metrics(full_item["results"])
+                    render_close_types(full_item["results"])
+                else:
+                    st.warning(f"No chart data available for {full_item['trading_pair']}")
+            
+            # Collapsible Batch Stats
+            with st.expander("📊 View Batch Statistics Charts", expanded=False):
+                col1, col2 = st.columns(2)
+                with col1:
+                    fig_pnl = px.bar(df_sorted, x='trading_pair', y='net_pnl', color='net_pnl', color_continuous_scale='RdYlGn', title="Net PnL % by Token")
+                    fig_pnl.update_layout(template="plotly_dark")
+                    st.plotly_chart(fig_pnl, use_container_width=True)
+                with col2:
+                    fig_scatter = px.scatter(df_sorted, x='accuracy', y='sharpe_ratio', size='total_positions', color='net_pnl', hover_name='trading_pair', title="Risk/Reward Map")
+                    fig_scatter.update_layout(template="plotly_dark")
+                    st.plotly_chart(fig_scatter, use_container_width=True)
+        
 
         return None
     else:

@@ -104,6 +104,7 @@ def run_process_safe_backtest(config_data: dict, start: int, end: int, resolutio
                 "max_drawdown_pct": float(summary.get("max_drawdown_pct", 0)),
                 "profit_factor": float(summary.get("profit_factor", 0)),
                 "total_positions": int(summary.get("total_positions", 0)),
+                "results": summary,  # Full summary dict for consistency with single-backtest mode
                 "processed_data": processed_data_json,
                 "executors": executors_info,
                 "config": config_data if isinstance(config_data, dict) else {},
