@@ -97,7 +97,10 @@ class BacktestingEngineBase:
         # Phase 1: Data Initialization
         start_init = time.perf_counter()
         self.backtesting_data_provider.update_backtesting_time(start, end)
-        await self.backtesting_data_provider.initialize_trading_rules(controller_config.connector_name)
+        try:
+            await self.backtesting_data_provider.initialize_trading_rules(controller_config.connector_name)
+        except Exception as e:
+            print(f"⚠️ [OFFLINE MODE] Could not fetch trading rules from {controller_config.connector_name}: {e}. Using defaults.")
         self.controller = controller_class(config=controller_config, market_data_provider=self.backtesting_data_provider,
                                            actions_queue=None)
         self.backtesting_resolution = backtesting_resolution

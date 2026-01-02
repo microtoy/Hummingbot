@@ -78,7 +78,22 @@ def run_process_safe_backtest(config_data: dict, start: int, end: int, resolutio
                 backtesting_resolution=resolution
             )
             
+            # Format result for visualization (with downsampling)
+            processed_data_dict = bt_result.get("processed_data")
+            processed_data_json = {}
+            if processed_data_dict and "features" in processed_data_dict:
+                df = processed_data_dict["features"].fillna(0)
+                if len(df) > 5000:
+                    step = len(df) // 5000
+                    df = df.iloc[::step]
+                if "timestamp" in df.columns:
+                    # reset_index(drop=True) avoids ambiguity if 'timestamp' is also an index level
+                    df = df.reset_index(drop=True).sort_values("timestamp")
+                processed_data_json = df.to_dict()
+            
+            executors_info = [e.to_dict() for e in bt_result["executors"]]
             summary = bt_result["results"]
+            
             # Convert results to native types for pickling
             return {
                 "trading_pair": controller_config.trading_pair,
@@ -89,6 +104,9 @@ def run_process_safe_backtest(config_data: dict, start: int, end: int, resolutio
                 "max_drawdown_pct": float(summary.get("max_drawdown_pct", 0)),
                 "profit_factor": float(summary.get("profit_factor", 0)),
                 "total_positions": int(summary.get("total_positions", 0)),
+                "processed_data": processed_data_json,
+                "executors": executors_info,
+                "config": config_data if isinstance(config_data, dict) else {},
                 "performance": bt_result.get("performance", {})
             }
         finally:
@@ -344,19 +362,34 @@ async def run_backtesting(backtesting_config: BacktestingConfig):
             backtesting_resolution=backtesting_config.backtesting_resolution
         )
         
-        # Format response for frontend
+        # Format response for frontend with optimization
         processed_data_dict = backtesting_results.get("processed_data")
         if processed_data_dict and "features" in processed_data_dict:
-            processed_data = processed_data_dict["features"].fillna(0)
+            df = processed_data_dict["features"].fillna(0)
+            # Optimization: Downsample if too many rows to avoid JSON serialization timeouts
+            if len(df) > 5000:
+                step = len(df) // 5000
+                df = df.iloc[::step]
+            
+            # Ensure timestamp is included and sorted for visualization
+            if "timestamp" in df.columns:
+                # reset_index(drop=True) avoids ambiguity if 'timestamp' is also an index level
+                df = df.reset_index(drop=True).sort_values("timestamp")
+            
+            import asyncio
+            from concurrent.futures import ThreadPoolExecutor
+            loop = asyncio.get_event_loop()
+            # Perform heavy CPU-bound to_dict in a thread to keep event loop responsive
+            with ThreadPoolExecutor() as pool:
+                processed_data_json = await loop.run_in_executor(pool, df.to_dict)
         else:
-            import pandas as pd
-            processed_data = pd.DataFrame()
+            processed_data_json = {}
         
         executors_info = [e.to_dict() for e in backtesting_results["executors"]]
         
         return {
             "executors": executors_info,
-            "processed_data": processed_data.to_dict(),
+            "processed_data": processed_data_json,
             "results": backtesting_results["results"],
             "performance": backtesting_results.get("performance", {})
         }

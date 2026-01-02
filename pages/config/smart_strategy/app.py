@@ -25,6 +25,7 @@ from frontend.visualization.backtesting_metrics import render_accuracy_metrics, 
 initialize_st_page(title="Smart Strategy", icon="🎯")
 backend_api_client = get_backend_api_client()
 
+
 def get_custom_strategies_dir() -> Optional[Path]:
     """Get the directory of custom strategies inside the container."""
     possible_dirs = [
@@ -134,21 +135,9 @@ def safe_backtesting_section(inputs, backend_api_client):
     default_start_time = yesterday - timedelta(days=7)
     with c1: start_date = st.date_input("Start Date", default_start_time, key="bt_sd")
     with c2: end_date = st.date_input("End Date", yesterday, key="bt_ed")
-    # Cache Validation Logic
-    available_res = []
-    try:
-        cache_status = backend_api_client.backtesting.get_candles_status()
-        available_res = [f["interval"] for f in cache_status.get("cached_files", []) 
-                         if f["connector"] == inputs.get("connector_name") and f["trading_pair"] == inputs.get("trading_pair")]
-    except: pass
-
     with c3: resolution = st.selectbox("Resolution", ["1m", "3m", "5m", "15m", "30m", "1h"], index=0, key="bt_res")
     with c4: cost = st.number_input("Cost (%)", min_value=0.0, value=0.06, step=0.01, key="bt_cost")
-    
-    # Check if selected resolution is available
-    is_data_missing = resolution not in available_res
-    if is_data_missing:
-        st.error(f"⚠️ Missing **{resolution}** data for {inputs.get('trading_pair')}. Please download it first in the 'Data' section.")
+    is_data_missing = False # Disabled slow check
     
     # Smart end timestamp: if end_date is today, use midnight (00:00) to avoid fetching incomplete data
     start_ts = int(datetime.combine(start_date, datetime.min.time()).timestamp())
@@ -193,6 +182,7 @@ def safe_backtesting_section(inputs, backend_api_client):
                     response = backend_api_client.backtesting.batch_run(batch_configs)
                     if response and "results" in response:
                         results = response["results"]
+                        st.session_state["batch_results"] = results
                         status.update(label="✅ Batch Complete!", state="complete")
                         
                         # Display results INSIDE the status container
@@ -231,6 +221,49 @@ def safe_backtesting_section(inputs, backend_api_client):
                 except Exception as e:
                     st.error(f"Execution Error: {e}")
         
+        # --- Drill-down Inspection Section ---
+        if "batch_results" in st.session_state and st.session_state["batch_results"]:
+            df_results = pd.DataFrame(st.session_state["batch_results"])
+            st.write("---")
+            st.subheader("🔍 Inspect Detailed Performance")
+            
+            with st.container(border=True):
+                inspect_pair = st.selectbox("Select Trading Pair for Detail View", 
+                                             options=df_results["trading_pair"].tolist(), 
+                                             key="inspect_pair_select")
+                
+                # Instant drill-down using data already returned by batch_run
+                selected_result = next((r for r in st.session_state["batch_results"] if r["trading_pair"] == inspect_pair), None)
+                
+                if selected_result:
+                    # Display metrics and figure immediately
+                    render_backtesting_metrics({
+                        "net_pnl": selected_result["net_pnl"],
+                        "net_pnl_quote": selected_result["net_pnl_quote"],
+                        "accuracy": selected_result["accuracy"],
+                        "sharpe_ratio": selected_result["sharpe_ratio"],
+                        "max_drawdown_pct": selected_result["max_drawdown_pct"],
+                        "profit_factor": selected_result["profit_factor"],
+                        "total_positions": selected_result["total_positions"]
+                    })
+                    
+                    if "processed_data" in selected_result and selected_result["processed_data"]:
+                        fig = create_backtesting_figure(
+                            df=selected_result["processed_data"], 
+                            executors=selected_result["executors"], 
+                            config=selected_result.get("config", inputs)
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+                        
+                        # Show accuracy and close types if available in results summary
+                        # (Note: full close_types might need specific mapping if not in top summary)
+                        render_accuracy_metrics({
+                            "accuracy": selected_result["accuracy"],
+                            "total_positions": selected_result["total_positions"]
+                        })
+                    else:
+                        st.warning(f"No chart data available for {inspect_pair}")
+
         return None
     else:
         # Original single-coin mode
@@ -281,47 +314,15 @@ config = st.session_state["default_config"]
 config["controller_name"] = selected_strat["id"]
 config["controller_type"] = "custom" # Key change: point to bots.controllers.custom
 
-# Market Config
 with st.expander("Market Configuration", expanded=True):
-    # 1. Fetch Cache Status for Smart Selectors
-    cache_map = {}
-    try:
-        cache_status = backend_api_client.backtesting.get_candles_status()
-        for f in cache_status.get("cached_files", []):
-            exch = f["connector"]
-            pair = f["trading_pair"]
-            if exch not in cache_map: cache_map[exch] = set()
-            cache_map[exch].add(pair)
-    except: pass
-    
     c1, c2 = st.columns(2)
     # Get defaults
     default_connector = selected_strat["info"]["parameters"].get("connector_name", "binance")
     default_pair = selected_strat["info"]["parameters"].get("trading_pair", "BTC-USDT")
 
-    if cache_map:
-        # Smart Selectors
-        connectors = sorted(list(cache_map.keys()))
-        prev_conn = config.get("connector_name", default_connector)
-        conn_idx = connectors.index(prev_conn) if prev_conn in connectors else 0
-        
-        selected_connector = c1.selectbox("Connector (Cached)", options=connectors, index=conn_idx)
-        config["connector_name"] = selected_connector
-        
-        pairs = sorted(list(cache_map[selected_connector]))
-        prev_pair = config.get("trading_pair", default_pair)
-        pair_idx = pairs.index(prev_pair) if prev_pair in pairs else 0
-        
-        config["trading_pair"] = c2.selectbox("Trading Pair (Cached)", options=pairs, index=pair_idx)
-        
-        # Show available intervals for this pair
-        avail_intervals = [f["interval"] for f in cache_status.get("cached_files", []) 
-                          if f["connector"] == config["connector_name"] and f["trading_pair"] == config["trading_pair"]]
-        st.caption(f"✅ Available Resolutions in Cache: {', '.join(avail_intervals)}")
-    else:
-        # Fallback to text input if no cache detected
-        config["connector_name"] = c1.text_input("Connector", value=config.get("connector_name", default_connector))
-        config["trading_pair"] = c2.text_input("Trading Pair", value=config.get("trading_pair", default_pair))
+    # Fast Text Inputs (No Backend Scanning)
+    config["connector_name"] = c1.text_input("Connector", value=config.get("connector_name", default_connector))
+    config["trading_pair"] = c2.text_input("Trading Pair", value=config.get("trading_pair", default_pair))
 
 # Dynamic Params
 params = selected_strat["info"]["parameters"]
