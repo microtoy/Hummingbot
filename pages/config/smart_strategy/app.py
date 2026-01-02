@@ -127,16 +127,54 @@ def safe_backtesting_section(inputs, backend_api_client):
     st.write("### Backtesting")
     
     # Mode selector
-    bt_mode = st.radio("Mode", ["Single Coin", "🚀 Batch Comparison"], horizontal=True, key="bt_mode")
+    bt_mode = st.radio("Mode", ["Single Coin", "🚀 Batch Comparison"], index=1, horizontal=True, key="bt_mode")
     
-    c1, c2, c3, c4 = st.columns(4)
     today = datetime.now().date()
     yesterday = today - timedelta(days=1)
+    
+    # --- Quick Date Presets ---
+    st.caption("📅 Quick Range Selection")
+    p1, p2, p3, p4, p5, p6, p7 = st.columns(7)
+    
+    # Global Interlock
+    is_running = st.session_state.get("is_batch_running", False)
+
+    # Preset Definitions
+    presets = {
+        "7D": 7, "1M": 30, "3M": 90, "6M": 180, "1Y": 365
+    }
+
+    # Auto-detect if current dates match a preset
+    current_sd = st.session_state.get("bt_sd", yesterday - timedelta(days=7))
+    current_ed = st.session_state.get("bt_ed", yesterday)
+    
+    matched_preset = "Custom"
+    for label, days in presets.items():
+        if current_sd == yesterday - timedelta(days=days) and current_ed == yesterday:
+            matched_preset = label
+            break
+    st.session_state["active_preset"] = matched_preset
+
+    def set_range(label, days):
+        st.session_state["active_preset"] = label
+        st.session_state["bt_sd"] = yesterday - timedelta(days=days)
+        st.session_state["bt_ed"] = yesterday
+        st.rerun()
+
+    if p1.button("7D", use_container_width=True, disabled=is_running, type="primary" if st.session_state["active_preset"] == "7D" else "secondary"): set_range("7D", 7)
+    if p2.button("1M", use_container_width=True, disabled=is_running, type="primary" if st.session_state["active_preset"] == "1M" else "secondary"): set_range("1M", 30)
+    if p3.button("3M", use_container_width=True, disabled=is_running, type="primary" if st.session_state["active_preset"] == "3M" else "secondary"): set_range("3M", 90)
+    if p4.button("6M", use_container_width=True, disabled=is_running, type="primary" if st.session_state["active_preset"] == "6M" else "secondary"): set_range("6M", 180)
+    if p5.button("1Y", use_container_width=True, disabled=is_running, type="primary" if st.session_state["active_preset"] == "1Y" else "secondary"): set_range("1Y", 365)
+    if p6.button("Custom", use_container_width=True, disabled=is_running, type="primary" if st.session_state["active_preset"] == "Custom" else "secondary"): pass # Auto-detected
+    if p7.button("Reset", use_container_width=True, disabled=is_running): set_range("7D", 7)
+
+    c1, c2, c3, c4 = st.columns(4)
     default_start_time = yesterday - timedelta(days=7)
-    with c1: start_date = st.date_input("Start Date", default_start_time, key="bt_sd")
-    with c2: end_date = st.date_input("End Date", yesterday, key="bt_ed")
-    with c3: resolution = st.selectbox("Resolution", ["1m", "3m", "5m", "15m", "30m", "1h"], index=0, key="bt_res")
-    with c4: cost = st.number_input("Cost (%)", min_value=0.0, value=0.06, step=0.01, key="bt_cost")
+    with c1: start_date = st.date_input("Start Date", default_start_time, key="bt_sd", disabled=is_running)
+    with c2: end_date = st.date_input("End Date", yesterday, key="bt_ed", disabled=is_running)
+    with c3: resolution = st.selectbox("Resolution", ["1m", "3m", "5m", "15m", "30m", "1h"], index=0, key="bt_res", disabled=is_running)
+    with c4: cost = st.number_input("Cost (%)", min_value=0.0, value=0.06, step=0.01, key="bt_cost", disabled=is_running)
     is_data_missing = False # Disabled slow check
     
     # Smart end timestamp: if end_date is today, use midnight (00:00) to avoid fetching incomplete data
@@ -160,119 +198,110 @@ def safe_backtesting_section(inputs, backend_api_client):
         st.caption(f"🖥️ Detected {cpu_cores} CPU cores. Selecting Top {min(cpu_cores, len(top_pairs))} coins by market cap.")
         selected_pairs = st.multiselect("Select Trading Pairs to Compare", options=top_pairs, default=top_pairs[:min(cpu_cores, len(top_pairs))], key="bt_pairs")
         
-        if st.button("🔥 Run Parallel Batch Backtest", key="bt_batch_run", type="primary"):
-            if not selected_pairs:
-                st.warning("Please select at least one trading pair.")
-                return None
-            
-            batch_configs = []
-            for pair in selected_pairs:
-                cfg = inputs.copy()
-                cfg["trading_pair"] = pair
-                batch_configs.append({
-                    "config": cfg,
-                    "start_time": start_ts,
-                    "end_time": end_ts,
-                    "backtesting_resolution": resolution,
-                    "trade_cost": cost / 100
-                })
-            
-            with st.status(f"Running {len(selected_pairs)} parallel backtests...", expanded=True) as status:
-                try:
-                    response = backend_api_client.backtesting.batch_run(batch_configs)
-                    if response and "results" in response:
-                        results = response["results"]
-                        st.session_state["batch_results"] = results
-                        status.update(label="✅ Batch Complete!", state="complete")
-                    else:
-                        st.error("Backend returned empty or error.")
-                except Exception as e:
-                    st.error(f"Execution Error: {e}")
+        if st.button("🔥 Run Parallel Batch Backtest", key="bt_batch_run", type="primary", disabled=st.session_state.get("is_batch_running", False)):
+            st.session_state["batch_results"] = None # Reset for new run
+            st.session_state["is_batch_running"] = True
+            st.rerun() # LOCKING SYNC: Force UI update to disable buttons BEFORE the blocking call below
         
-        # --- Persistent Results Display (Outside status) ---
-        if "batch_results" in st.session_state and st.session_state["batch_results"]:
-            results = st.session_state["batch_results"]
-            df = pd.DataFrame(results)
-            df_sorted = df.sort_values("net_pnl", ascending=False).reset_index(drop=True)
+        # Consistent Status Bar Logic (Persistent)
+        if st.session_state.get("is_batch_running") or (st.session_state.get("batch_results")):
+            status_label = "🚀 Processing Batch Backtests..." if st.session_state.get("is_batch_running") else "✅ Batch Complete!"
+            status_state = "running" if st.session_state.get("is_batch_running") else "complete"
             
-            st.write("---")
-            st.subheader("🏆 Market Leaderboard")
-            st.caption("💡 Click a **Trading Pair** to view its detailed chart below")
-            
-            # Custom Interactive Table using Columns
-            # Header
-            h1, h2, h3, h4, h5, h6 = st.columns([1.5, 1, 1, 1, 1, 1])
-            h1.write("**Trading Pair**")
-            h2.write("**Net PnL %**")
-            h3.write("**PnL ($)**")
-            h4.write("**Accuracy**")
-            h5.write("**Max DD**")
-            h6.write("**Sharpe**")
-            
-            # Initialize selection in session state if not present
-            if "selected_batch_pair" not in st.session_state:
-                st.session_state["selected_batch_pair"] = df_sorted.iloc[0]["trading_pair"]
+            with st.status(status_label, expanded=True, state=status_state) as status:
+                if st.session_state.get("is_batch_running"):
+                    batch_configs = []
+                    for pair in selected_pairs:
+                        cfg = inputs.copy()
+                        cfg["trading_pair"] = pair
+                        batch_configs.append({
+                            "config": cfg, "start_time": start_ts, "end_time": end_ts,
+                            "backtesting_resolution": resolution, "trade_cost": cost / 100
+                        })
+                    try:
+                        response = backend_api_client.backtesting.batch_run(batch_configs)
+                        if response and "results" in response:
+                            st.session_state["batch_results"] = response["results"]
+                            st.session_state["is_batch_running"] = False
+                            st.rerun() # Refresh to show results inside 'complete' status
+                        else:
+                            st.error("Backend returned empty or error.")
+                            st.session_state["is_batch_running"] = False
+                    except Exception as e:
+                        st.error(f"Execution Error: {e}")
+                        st.session_state["is_batch_running"] = False
 
-            # Rows
-            for idx, row in df_sorted.iterrows():
-                r1, r2, r3, r4, r5, r6 = st.columns([1.5, 1, 1, 1, 1, 1])
-                # Trading pair as a button to select
-                if r1.button(row["trading_pair"], key=f"select_{row['trading_pair']}", use_container_width=True, 
-                            type="primary" if st.session_state["selected_batch_pair"] == row["trading_pair"] else "secondary"):
-                    st.session_state["selected_batch_pair"] = row["trading_pair"]
-                    st.rerun()
-                
-                # Metrics with coloring
-                pnl_color = "green" if row["net_pnl"] > 0 else "red"
-                r2.markdown(f":{pnl_color}[{row['net_pnl']:.2%}]")
-                r3.write(f"${row['net_pnl_quote']:.2f}")
-                r4.write(f"{row['accuracy']:.1%}")
-                r5.markdown(f":red[{row['max_drawdown_pct']:.2%}]")
-                r6.write(f"{row['sharpe_ratio']:.2f}")
+                # Render Leaderboard RIGHT HERE inside the same status container
+                if st.session_state.get("batch_results"):
+                    results = st.session_state["batch_results"]
+                    df = pd.DataFrame(results)
+                    df_sorted = df.sort_values("net_pnl", ascending=False).reset_index(drop=True)
+                    
+                    st.caption("💡 Click a **Trading Pair** to view its detailed chart below")
+                    
+                    # Custom Interactive Table using Columns
+                    h1, h2, h3, h4, h5, h6 = st.columns([1.5, 1, 1, 1, 1, 1])
+                    h1.write("**Trading Pair**")
+                    h2.write("**Net PnL %**")
+                    h3.write("**PnL ($)**")
+                    h4.write("**Accuracy**")
+                    h5.write("**Max DD**")
+                    h6.write("**Sharpe**")
+                    
+                    if "selected_batch_pair" not in st.session_state:
+                        st.session_state["selected_batch_pair"] = df_sorted.iloc[0]["trading_pair"]
 
-            # Summary Metrics for the whole batch
-            st.write("### Batch Summary")
-            s1, s2, s3, s4 = st.columns(4)
-            s1.metric("Avg PnL %", f"{df['net_pnl'].mean():.2%}")
-            s2.metric("Total PnL $", f"${df['net_pnl_quote'].sum():,.2f}")
-            s3.metric("Market Win Rate", f"{(df['net_pnl'] > 0).mean():.1%}")
-            if not df_sorted.empty:
-                s4.metric("Best Performer", df_sorted.iloc[0]['trading_pair'])
+                    for idx, row in df_sorted.iterrows():
+                        r1, r2, r3, r4, r5, r6 = st.columns([1.5, 1, 1, 1, 1, 1])
+                        if r1.button(row["trading_pair"], key=f"select_{row['trading_pair']}", use_container_width=True, 
+                                    disabled=st.session_state.get("is_batch_running", False),
+                                    type="primary" if st.session_state["selected_batch_pair"] == row["trading_pair"] else "secondary"):
+                            st.session_state["selected_batch_pair"] = row["trading_pair"]
+                            st.rerun()
+                        
+                        pnl_color = "green" if row["net_pnl"] > 0 else "red"
+                        r2.markdown(f":{pnl_color}[{row['net_pnl']:.2%}]")
+                        r3.write(f"${row['net_pnl_quote']:.2f}")
+                        r4.write(f"{row['accuracy']:.1%}")
+                        r5.markdown(f":red[{row['max_drawdown_pct']:.2%}]")
+                        r6.write(f"{row['sharpe_ratio']:.2f}")
 
-            # Handle Detail View for selected pair
-            inspect_pair = st.session_state["selected_batch_pair"]
-            full_item = next((r for r in results if r["trading_pair"] == inspect_pair), None)
+                    st.write("---")
+                    st.write("**Batch Summary Highlights**")
+                    s1, s2, s3, s4 = st.columns(4)
+                    s1.metric("Avg PnL %", f"{df['net_pnl'].mean():.2%}")
+                    s2.metric("Total PnL $", f"${df['net_pnl_quote'].sum():,.2f}")
+                    s3.metric("Market Win Rate", f"{(df['net_pnl'] > 0).mean():.1%}")
+                    if not df_sorted.empty:
+                        s4.metric("Best Performer", df_sorted.iloc[0]['trading_pair'])
+
+        # Handle Detail View for selected pair (Remains below to keep container focused)
+        if st.session_state.get("batch_results"):
+            inspect_pair = st.session_state.get("selected_batch_pair")
+            full_item = next((r for r in st.session_state["batch_results"] if r["trading_pair"] == inspect_pair), None)
             
             if full_item:
                 st.write("---")
                 st.subheader(f"📈 Detailed View: {full_item['trading_pair']}")
-                
-                # Consistently render all metrics using the shared components
                 render_backtesting_metrics(full_item["results"])
                 
                 if "processed_data" in full_item and full_item["processed_data"]:
                     fig = create_backtesting_figure(
-                        df=full_item["processed_data"], 
-                        executors=full_item["executors"], 
+                        df=full_item["processed_data"], executors=full_item["executors"], 
                         config=full_item.get("config", inputs)
                     )
                     st.plotly_chart(fig, use_container_width=True)
-                    
                     render_accuracy_metrics(full_item["results"])
                     render_close_types(full_item["results"])
-                else:
-                    st.warning(f"No chart data available for {full_item['trading_pair']}")
-            
-            # Collapsible Batch Stats
-            with st.expander("📊 View Batch Statistics Charts", expanded=False):
+
+            with st.expander("📊 View Full Batch Charts", expanded=False):
+                df_sorted = pd.DataFrame(st.session_state["batch_results"]).sort_values("net_pnl", ascending=False)
                 col1, col2 = st.columns(2)
                 with col1:
                     fig_pnl = px.bar(df_sorted, x='trading_pair', y='net_pnl', color='net_pnl', color_continuous_scale='RdYlGn', title="Net PnL % by Token")
-                    fig_pnl.update_layout(template="plotly_dark")
                     st.plotly_chart(fig_pnl, use_container_width=True)
                 with col2:
                     fig_scatter = px.scatter(df_sorted, x='accuracy', y='sharpe_ratio', size='total_positions', color='net_pnl', hover_name='trading_pair', title="Risk/Reward Map")
-                    fig_scatter.update_layout(template="plotly_dark")
                     st.plotly_chart(fig_scatter, use_container_width=True)
         
 
