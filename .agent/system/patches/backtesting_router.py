@@ -102,9 +102,12 @@ def run_process_safe_backtest(config_data: dict, start: int, end: int, resolutio
     return asyncio.run(_async_run())
 
 
+# Global state for tracking active sync tasks
+ACTIVE_SYNC_TASKS = set()
+
 @router.get("/candles/status")
 async def get_candles_status():
-    """Get the status of cached candles on the server."""
+    """Get the status of cached candles on the server using fast binary probing."""
     try:
         cache_dir = Path(hummingbot.data_path()) / "candles"
         if not cache_dir.exists():
@@ -113,85 +116,205 @@ async def get_candles_status():
         files = []
         for f in cache_dir.glob("*.csv"):
             try:
-                df = pd.read_csv(f, usecols=["timestamp"])
-                if not df.empty:
-                    files.append({
-                        "file": f.name,
-                        "count": len(df),
-                        "start": int(df["timestamp"].min()),
-                        "end": int(df["timestamp"].max())
-                    })
+                # Optimized metadata probe
+                min_ts, max_ts, row_count = None, None, 0
+                file_size = f.stat().st_size
+                if file_size == 0: continue
+                
+                # Extract pair/interval from filename: binance_BTC-USDT_1m.csv
+                parts = f.stem.split("_")
+                if len(parts) >= 3:
+                    connector = parts[0]
+                    interval = parts[-1]
+                    trading_pair = "_".join(parts[1:-1])
+                else:
+                    connector, trading_pair, interval = "unknown", f.stem, "unknown"
+
+                with open(f, 'rb') as fh:
+                    # 1. Start TS (skip header)
+                    fh.readline()
+                    first_line = fh.readline()
+                    if first_line:
+                        min_ts = int(float(first_line.split(b',')[0]))
+                    
+                    # 2. End TS (last 1KB)
+                    fh.seek(0, 2)
+                    fh.seek(max(0, file_size - 1024), 0)
+                    last_lines = fh.read().splitlines()
+                    for line in reversed(last_lines):
+                        if line.strip() and b',' in line:
+                            try:
+                                max_ts = int(float(line.split(b',')[0]))
+                                break
+                            except: continue
+                    
+                    # 3. Fast Row Count
+                    fh.seek(0)
+                    row_count = sum(line.count(b'\n') for line in iter(lambda: fh.read(1024 * 1024), b''))
+
+                files.append({
+                    "file": f.name,
+                    "connector": connector,
+                    "trading_pair": trading_pair,
+                    "interval": interval,
+                    "count": row_count,
+                    "start": min_ts,
+                    "end": max_ts
+                })
             except:
                 continue
-        return {"cached_files": files}
+        return {"cached_files": sorted(files, key=lambda x: x['file'])}
+    except Exception as e:
+        return {"error": str(e)}
+
+@router.get("/candles/csv")
+async def download_candles_csv(connector: str, trading_pair: str, interval: str):
+    """Download the raw CSV file for a specific pair and interval."""
+    try:
+        from pathlib import Path
+        import hummingbot
+        from fastapi.responses import FileResponse
+        
+        cache_dir = Path(hummingbot.data_path()) / "candles"
+        filename = f"{connector}_{trading_pair}_{interval}.csv"
+        cache_file = cache_dir / filename
+        
+        if not cache_file.exists():
+            return {"error": f"File {filename} not found on server."}
+            
+        return FileResponse(
+            path=cache_file,
+            filename=filename,
+            media_type='text/csv'
+        )
     except Exception as e:
         return {"error": str(e)}
 
 @router.post("/candles/sync")
 async def sync_candles(backtesting_config: BacktestingConfig):
     """Prefetch and cache candles with automatic buffer padding."""
+    import asyncio
+    current_task = asyncio.current_task()
     try:
         from types import SimpleNamespace
         from pathlib import Path
         import hummingbot
+        import time
+        from hummingbot.data_feed.candles_feed.candles_base import CandlesBase
+
+        interval = backtesting_config.backtesting_resolution
+        start_time = int(backtesting_config.start_time)
+        end_time = int(backtesting_config.end_time)
         
         # 1. Determine controller config
         if isinstance(backtesting_config.config, dict) and "connector_name" in backtesting_config.config:
+            connector_name = backtesting_config.config["connector_name"]
+            trading_pair = backtesting_config.config["trading_pair"]
             controller_config = SimpleNamespace(
-                connector_name=backtesting_config.config["connector_name"],
-                trading_pair=backtesting_config.config["trading_pair"],
+                connector_name=connector_name,
+                trading_pair=trading_pair,
                 candles_config=backtesting_config.config.get("candles_config", [])
             )
-        elif isinstance(backtesting_config.config, str):
-            engine = BacktestingEngineBase()
-            controller_config = engine.get_controller_config_instance_from_yml(
-                config_path=backtesting_config.config,
-                controllers_conf_dir_path=settings.app.controllers_path,
-                controllers_module=settings.app.controllers_module
-            )
         else:
+            # Fallback for complex configs (less common for direct sync)
             engine = BacktestingEngineBase()
-            controller_config = engine.get_controller_config_instance_from_dict(
-                config_data=backtesting_config.config,
-                controllers_module=settings.app.controllers_module
-            )
-            
-        # 2. Pad the start time with buffer (Generous 2000 candles to ensure hits)
-        from hummingbot.data_feed.candles_feed.candles_base import CandlesBase
-        interval = backtesting_config.backtesting_resolution
-        buffer_seconds = 2000 * CandlesBase.interval_to_seconds.get(interval, 60)
-        padded_start = int(backtesting_config.start_time - buffer_seconds)
+            if isinstance(backtesting_config.config, str):
+                controller_config = engine.get_controller_config_instance_from_yml(
+                    config_path=backtesting_config.config,
+                    controllers_conf_dir_path=settings.app.controllers_path,
+                    controllers_module=settings.app.controllers_module
+                )
+            else:
+                controller_config = engine.get_controller_config_instance_from_dict(
+                    config_data=backtesting_config.config,
+                    controllers_module=settings.app.controllers_module
+                )
+            connector_name = controller_config.connector_name
+            trading_pair = controller_config.trading_pair
+
+        # --- FAST PRE-CHECK (Ultra Lazy) ---
+        cache_dir = Path(hummingbot.data_path()) / "candles"
+        filename = f"{connector_name}_{trading_pair}_{interval}.csv"
+        cache_file = cache_dir / filename
         
-        # 3. Trigger initialization (which hits the smart cache in engine)
+        if cache_file.exists() and cache_file.stat().st_size > 0:
+            try:
+                min_ts, max_ts, row_count = None, None, 0
+                with open(cache_file, 'rb') as f:
+                    # Start TS
+                    f.readline() # Header
+                    first_line = f.readline()
+                    if first_line: min_ts = int(float(first_line.split(b',')[0]))
+                    
+                    # End TS & Fast Count Estimate
+                    f.seek(0, 2)
+                    file_size = f.tell()
+                    f.seek(max(0, file_size - 1024), 0)
+                    last_lines = f.read().splitlines()
+                    for line in reversed(last_lines):
+                        if line.strip() and b',' in line:
+                            try:
+                                max_ts = int(float(line.split(b',')[0]))
+                                break
+                            except: continue
+                
+                # If cache hit (covers range plus small buffer for safety), return immediately
+                # Logic: if existing data covers start and is close enough to end (within 1 hour for old data)
+                effective_end = min(end_time, int(time.time()) - 60)
+                if min_ts is not None and max_ts is not None:
+                    if min_ts <= start_time and max_ts >= effective_end - 3600:
+                        # Full count only once if really needed, otherwise estimate
+                        row_count = int(file_size / (len(first_line) if first_line else 100)) # Approximation
+                        return {
+                            "status": "success",
+                            "message": f"Verified [SMART HIT]: Already covering {start_time} to {max_ts}",
+                            "rows": row_count
+                        }
+            except: pass
+
+        # 2. Start Task Tracking
+        ACTIVE_SYNC_TASKS.add(current_task)
+        
+        # 3. Trigger incremental padding check via Engine
+        buffer_seconds = 2000 * CandlesBase.interval_to_seconds.get(interval, 60)
+        padded_start = int(start_time - buffer_seconds)
+        
         engine = BacktestingEngineBase()
-        engine.backtesting_data_provider.update_backtesting_time(
-            padded_start, int(backtesting_config.end_time))
+        engine.allow_download = True 
+        engine.backtesting_data_provider.max_records = 0 # Prevent TypeError in some logic
+        engine.backtesting_data_provider.update_backtesting_time(padded_start, end_time)
         engine.controller = SimpleNamespace(config=controller_config)
         engine.backtesting_resolution = interval
         
         await engine.initialize_backtesting_data_provider()
         
-        # 4. Get row count from cache file
-        cache_dir = Path(hummingbot.data_path()) / "candles"
-        filename = f"{controller_config.connector_name}_{controller_config.trading_pair}_{interval}.csv"
-        cache_file = cache_dir / filename
-        
         row_count = 0
         if cache_file.exists():
             try:
-                # Fast binary row count using buffer chunks
                 with open(cache_file, 'rb') as f:
                     row_count = sum(line.count(b'\n') for line in iter(lambda: f.read(1024 * 1024), b''))
-            except:
-                row_count = -1
+            except: row_count = -1
         
         return {
             "status": "success", 
-            "message": f"Synced {row_count:,} rows ({buffer_seconds/3600:.1f}h buffer)",
+            "message": f"Incremental sync complete. Current rows: {row_count:,}",
             "rows": row_count
         }
+    except asyncio.CancelledError:
+        print(f"🛑 [SYNC CANCELLED] Task stopped for {backtesting_config.config.get('trading_pair', 'unknown')}")
+        return {"status": "cancelled", "message": "Sync was force stopped by user."}
     except Exception as e:
         return {"error": str(e)}
+    finally:
+        ACTIVE_SYNC_TASKS.discard(current_task)
+
+@router.post("/candles/stop-all")
+async def stop_all_sync_tasks():
+    """Force stop all active candle sync background tasks."""
+    count = len(ACTIVE_SYNC_TASKS)
+    for task in list(ACTIVE_SYNC_TASKS):
+        task.cancel()
+    return {"status": "success", "cancelled_count": count, "message": f"Signaled cancellation for {count} tasks."}
 
 @router.post("/run-backtesting")
 async def run_backtesting(backtesting_config: BacktestingConfig):
@@ -200,6 +323,7 @@ async def run_backtesting(backtesting_config: BacktestingConfig):
     """
     try:
         engine = BacktestingEngineBase()
+        engine.allow_download = False  # ENFORCE LOCAL ONLY for simulation
         if isinstance(backtesting_config.config, str):
             controller_config = engine.get_controller_config_instance_from_yml(
                 config_path=backtesting_config.config,
@@ -275,6 +399,7 @@ async def batch_sync_candles(batch_configs: list[BacktestingConfig]):
                     padded_start, int(config.end_time))
                 engine.controller = SimpleNamespace(config=controller_config)
                 engine.backtesting_resolution = interval
+                engine.allow_download = True # Explicitly allow network download for batch-sync endpoint
                 
                 await engine.initialize_backtesting_data_provider()
                 
@@ -293,10 +418,11 @@ async def batch_sync_candles(batch_configs: list[BacktestingConfig]):
                 # Short delay between requests
                 await asyncio.sleep(0.2)
                 
-                return {"pair": controller_config.trading_pair, "status": "success", "rows": row_count}
+                return {"pair": controller_config.trading_pair, "interval": interval, "status": "success", "rows": row_count}
             except Exception as e:
                 pair = config.config.get("trading_pair", "Unknown") if isinstance(config.config, dict) else "Unknown"
-                return {"pair": pair, "status": "error", "message": str(e)}
+                interval = config.backtesting_resolution
+                return {"pair": pair, "interval": interval, "status": "error", "message": str(e)}
     
     # Launch ALL sync tasks (semaphore will limit actual concurrency to 3)
     tasks = [sync_single_pair(config) for config in batch_configs]
@@ -340,6 +466,7 @@ async def batch_run_backtesting(batch_configs: list[BacktestingConfig]):
                 
             # Only if file is missing, we use the engine to potentially download (if allowed)
             engine = BacktestingEngineBase()
+            engine.allow_download = False # STRICT-LOCAL for backtesting warm-up
             # engine.allow_download is user-controlled via config or global flag
             # For now, we respect the engine's default or the last user set value
             engine.backtesting_data_provider.update_backtesting_time(
