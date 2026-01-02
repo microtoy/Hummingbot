@@ -61,9 +61,11 @@ def extract_value(node) -> Any:
                 for kw in node.keywords:
                     if kw.arg == "default":
                         return extract_value(kw.value)
-        elif isinstance(node.func, ast.Attribute):
-            # Handle cases like TradeType.BUY if needed, for now just constant/literal
-            pass
+    elif isinstance(node, ast.Attribute):
+        return node.attr
+    elif isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+        val = extract_value(node.operand)
+        return -val if val is not None else None
     return None
 
 def extract_controller_info(content: str) -> Dict[str, Any]:
@@ -83,7 +85,7 @@ def extract_controller_info(content: str) -> Dict[str, Any]:
                         if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
                             attr_name = item.target.id
                             # Ignore standard fields
-                            if attr_name in ["controller_name", "candles_config", "markets"]:
+                            if attr_name in ["controller_name", "candles_config", "markets", "connector_name", "trading_pair"]:
                                 continue
                             
                             value = extract_value(item.value) if item.value is not None else None
@@ -132,8 +134,21 @@ def safe_backtesting_section(inputs, backend_api_client):
     default_start_time = yesterday - timedelta(days=7)
     with c1: start_date = st.date_input("Start Date", default_start_time, key="bt_sd")
     with c2: end_date = st.date_input("End Date", yesterday, key="bt_ed")
-    with c3: resolution = st.selectbox("Resolution", ["1m", "3m", "5m", "15m", "1h"], index=0, key="bt_res")
+    # Cache Validation Logic
+    available_res = []
+    try:
+        cache_status = backend_api_client.backtesting.get_candles_status()
+        available_res = [f["interval"] for f in cache_status.get("cached_files", []) 
+                         if f["connector"] == inputs.get("connector_name") and f["trading_pair"] == inputs.get("trading_pair")]
+    except: pass
+
+    with c3: resolution = st.selectbox("Resolution", ["1m", "3m", "5m", "15m", "30m", "1h"], index=0, key="bt_res")
     with c4: cost = st.number_input("Cost (%)", min_value=0.0, value=0.06, step=0.01, key="bt_cost")
+    
+    # Check if selected resolution is available
+    is_data_missing = resolution not in available_res
+    if is_data_missing:
+        st.error(f"⚠️ Missing **{resolution}** data for {inputs.get('trading_pair')}. Please download it first in the 'Data' section.")
     
     # Smart end timestamp: if end_date is today, use midnight (00:00) to avoid fetching incomplete data
     start_ts = int(datetime.combine(start_date, datetime.min.time()).timestamp())
@@ -219,7 +234,7 @@ def safe_backtesting_section(inputs, backend_api_client):
         return None
     else:
         # Original single-coin mode
-        run_bt = st.button("Run Backtesting", key="bt_run")
+        run_bt = st.button("Run Backtesting", key="bt_run", disabled=is_data_missing, type="primary" if not is_data_missing else "secondary")
         if run_bt:
             with st.spinner("Executing simulation on backend..."):
                 try:
@@ -268,13 +283,45 @@ config["controller_type"] = "custom" # Key change: point to bots.controllers.cus
 
 # Market Config
 with st.expander("Market Configuration", expanded=True):
+    # 1. Fetch Cache Status for Smart Selectors
+    cache_map = {}
+    try:
+        cache_status = backend_api_client.backtesting.get_candles_status()
+        for f in cache_status.get("cached_files", []):
+            exch = f["connector"]
+            pair = f["trading_pair"]
+            if exch not in cache_map: cache_map[exch] = set()
+            cache_map[exch].add(pair)
+    except: pass
+    
     c1, c2 = st.columns(2)
-    # Get defaults from the strategy definition if available, otherwise fallback to hardcoded
+    # Get defaults
     default_connector = selected_strat["info"]["parameters"].get("connector_name", "binance")
     default_pair = selected_strat["info"]["parameters"].get("trading_pair", "BTC-USDT")
-    
-    config["connector_name"] = c1.text_input("Connector", value=config.get("connector_name", default_connector))
-    config["trading_pair"] = c2.text_input("Trading Pair", value=config.get("trading_pair", default_pair))
+
+    if cache_map:
+        # Smart Selectors
+        connectors = sorted(list(cache_map.keys()))
+        prev_conn = config.get("connector_name", default_connector)
+        conn_idx = connectors.index(prev_conn) if prev_conn in connectors else 0
+        
+        selected_connector = c1.selectbox("Connector (Cached)", options=connectors, index=conn_idx)
+        config["connector_name"] = selected_connector
+        
+        pairs = sorted(list(cache_map[selected_connector]))
+        prev_pair = config.get("trading_pair", default_pair)
+        pair_idx = pairs.index(prev_pair) if prev_pair in pairs else 0
+        
+        config["trading_pair"] = c2.selectbox("Trading Pair (Cached)", options=pairs, index=pair_idx)
+        
+        # Show available intervals for this pair
+        avail_intervals = [f["interval"] for f in cache_status.get("cached_files", []) 
+                          if f["connector"] == config["connector_name"] and f["trading_pair"] == config["trading_pair"]]
+        st.caption(f"✅ Available Resolutions in Cache: {', '.join(avail_intervals)}")
+    else:
+        # Fallback to text input if no cache detected
+        config["connector_name"] = c1.text_input("Connector", value=config.get("connector_name", default_connector))
+        config["trading_pair"] = c2.text_input("Trading Pair", value=config.get("trading_pair", default_pair))
 
 # Dynamic Params
 params = selected_strat["info"]["parameters"]
@@ -286,7 +333,14 @@ if params:
             for col, (p_name, p_val) in zip(cols, items[i:i+3]):
                 cur_val = config.get(p_name, p_val)
                 label = p_name.replace("_", " ").title()
-                if isinstance(p_val, bool):
+                if p_name == "indicator_interval" or p_name.endswith("_interval"):
+                    options = ["1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d"]
+                    # Map Enum names to values if necessary
+                    val_map = {"M1":"1m", "M3":"3m", "M5":"5m", "M15":"15m", "M30":"30m", "H1":"1h", "H4":"4h", "D1":"1d"}
+                    clean_val = val_map.get(cur_val, cur_val)
+                    idx = options.index(clean_val) if clean_val in options else 4 # Default 1h
+                    config[p_name] = col.selectbox(label, options=options, index=idx, key=f"ui_{p_name}")
+                elif isinstance(p_val, bool):
                     config[p_name] = col.checkbox(label, value=bool(cur_val), key=f"ui_{p_name}")
                 elif isinstance(p_val, list):
                     # Show list as comma-separated string for editing

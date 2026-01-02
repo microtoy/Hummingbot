@@ -99,7 +99,7 @@ with c1:
     connector = st.selectbox("Exchange", ["binance", "binance_perpetual", "gate_io", "gate_io_perpetual", "kucoin", "ascend_ex"], index=0)
     trading_pair = st.text_input("Trading Pair", value="BTC-USDT")
 with c2:
-    intervals = st.multiselect("Intervals", options=["1m", "3m", "5m", "15m", "1h", "4h", "1d", "1s"], default=["1h", "1d"])
+    intervals = st.multiselect("Intervals", options=["1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d", "1s"], default=["1h", "1d"])
 with c3:
     start_date = st.date_input("Start Date", value=datetime.now() - timedelta(days=7))
     end_date = st.date_input("End Date", value=datetime.now() - timedelta(days=1))

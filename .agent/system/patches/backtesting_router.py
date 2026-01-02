@@ -323,7 +323,7 @@ async def run_backtesting(backtesting_config: BacktestingConfig):
     """
     try:
         engine = BacktestingEngineBase()
-        engine.allow_download = False  # ENFORCE LOCAL ONLY for simulation
+        engine.allow_download = False  # ENFORCE LOCAL ONLY for simulation (as per user request)
         if isinstance(backtesting_config.config, str):
             controller_config = engine.get_controller_config_instance_from_yml(
                 config_path=backtesting_config.config,
@@ -345,20 +345,30 @@ async def run_backtesting(backtesting_config: BacktestingConfig):
         )
         
         # Format response for frontend
-        processed_data = backtesting_results["processed_data"]["features"].fillna(0)
+        processed_data_dict = backtesting_results.get("processed_data")
+        if processed_data_dict and "features" in processed_data_dict:
+            processed_data = processed_data_dict["features"].fillna(0)
+        else:
+            import pandas as pd
+            processed_data = pd.DataFrame()
+        
         executors_info = [e.to_dict() for e in backtesting_results["executors"]]
         
-        response = {
+        return {
             "executors": executors_info,
             "processed_data": processed_data.to_dict(),
             "results": backtesting_results["results"],
+            "performance": backtesting_results.get("performance", {})
         }
-        if "performance" in backtesting_results:
-            response["performance"] = backtesting_results["performance"]
-            
-        return response
     except Exception as e:
-        return {"error": str(e)}
+        import traceback
+        traceback.print_exc()
+        return {
+            "error": str(e),
+            "executors": [],
+            "processed_data": {},
+            "results": {"net_pnl": 0, "total_positions": 0, "close_types": {}}
+        }
 
 @router.post("/candles/batch-sync")
 async def batch_sync_candles(batch_configs: list[BacktestingConfig]):

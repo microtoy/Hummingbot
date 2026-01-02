@@ -12,6 +12,17 @@ from hummingbot.strategy_v2.controllers.directional_trading_controller_base impo
 )
 
 
+from enum import Enum
+class CandleInterval(str, Enum):
+    M1 = "1m"
+    M3 = "3m"
+    M5 = "5m"
+    M15 = "15m"
+    M30 = "30m"
+    H1 = "1h"
+    H4 = "4h"
+    D1 = "1d"
+
 class BollingerV1StrategyConfig(DirectionalTradingControllerConfigBase):
     """
     Configuration for Bollinger V1 (Volatility Breakout) Strategy.
@@ -25,6 +36,7 @@ class BollingerV1StrategyConfig(DirectionalTradingControllerConfigBase):
     bb_std: float = Field(default=2.0, description="Bollinger Bands standard deviation")
     rsi_length: int = Field(default=14, description="RSI length")
     atr_length: int = Field(default=14, description="ATR length")
+    indicator_interval: CandleInterval = Field(default=CandleInterval.H1, description="Interval for technical indicators")
     
     # Filters
     rsi_overbought: float = Field(default=70.0, description="RSI Overbought threshold")
@@ -58,9 +70,9 @@ class BollingerV1StrategyController(DirectionalTradingControllerBase):
     """
     def __init__(self, config: BollingerV1StrategyConfig, *args, **kwargs):
         if not config.candles_config:
-            # Default to 1h candles
+            # Default to configured interval
             config.candles_config = [
-                CandlesConfig(connector=config.connector_name, trading_pair=config.trading_pair, interval="1h", max_records=500)
+                CandlesConfig(connector=config.connector_name, trading_pair=config.trading_pair, interval=config.indicator_interval, max_records=500)
             ]
         
         super().__init__(config, *args, **kwargs)
@@ -72,20 +84,19 @@ class BollingerV1StrategyController(DirectionalTradingControllerBase):
         CRITICAL: Applies Timestamp Shift to prevent Look-Ahead Bias.
         """
         from hummingbot.data_feed.candles_feed.candles_base import CandlesBase
-
-        interval = self.config.candles_config[0].interval if self.config.candles_config else "1h"
-        candles = self.market_data_provider.get_candles_df(self.config.connector_name, self.config.trading_pair, interval).copy()
         
+        interval = str(self.config.indicator_interval.value) if hasattr(self.config.indicator_interval, "value") else str(self.config.indicator_interval)
+        candles = self.market_data_provider.get_candles_df(self.config.connector_name, self.config.trading_pair, interval)
+        
+        if candles is None or candles.empty:
+            self.processed_data = {"signal": 0, "features": pd.DataFrame()}
+            return
+            
+        candles = candles.copy()
         if len(candles) < max(self.config.bb_length, self.config.rsi_length, self.config.atr_length) + 1:
             candles["signal"] = 0
             self.processed_data = {"signal": 0, "features": candles}
             return
-
-        # --------------------------------------------------------------------------
-        # [CRITICAL AUDIT FIX] Timestamp Safety Shift
-        # --------------------------------------------------------------------------
-        shift_seconds = CandlesBase.interval_to_seconds[interval]
-        candles["timestamp"] = candles["timestamp"] + shift_seconds
 
         # --- Indicator Calculations ---
         # 1. Bollinger Bands
@@ -136,6 +147,11 @@ class BollingerV1StrategyController(DirectionalTradingControllerBase):
         
         candles.loc[long_condition, "signal"] = 1
         candles.loc[short_condition, "signal"] = -1
+
+        # --------------------------------------------------------------------------
+        # [ANTI-LOOK-AHEAD BIAS] Signal Lagging
+        # --------------------------------------------------------------------------
+        candles["signal"] = candles["signal"].shift(1).fillna(0).astype(int)
 
         self.processed_data = {
             "signal": int(candles["signal"].iloc[-1]),

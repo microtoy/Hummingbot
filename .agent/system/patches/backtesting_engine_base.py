@@ -106,7 +106,8 @@ class BacktestingEngineBase:
         
         # Phase 2: Processed Data (Strategy Logic)
         start_processed = time.perf_counter()
-        await self.controller.update_processed_data()
+        if hasattr(self.controller, "update_processed_data"):
+            await self.controller.update_processed_data()
         performance_report["processed_data_calc"] = time.perf_counter() - start_processed
         
         # Phase 3: Execution Simulation
@@ -118,12 +119,14 @@ class BacktestingEngineBase:
         results = self.summarize_results(executors_info, controller_config.total_amount_quote)
         
         performance_report["total_time"] = time.perf_counter() - start_time_total
-        performance_report["kline_count"] = len(self.controller.processed_data.get("features", []))
+        processed_data = getattr(self.controller, "processed_data", None)
+        features = processed_data.get("features", []) if isinstance(processed_data, dict) else []
+        performance_report["kline_count"] = len(features)
         
         return {
             "executors": executors_info,
             "results": results,
-            "processed_data": self.controller.processed_data,
+            "processed_data": getattr(self.controller, "processed_data", None),
             "performance": performance_report
         }
 
