@@ -152,6 +152,7 @@ if sync_to_server or get_data_button:
     if not intervals: st.error("Please select at least one interval.")
     else:
         init_task_status([trading_pair], intervals, connector, start_date, end_date)
+        redraw_table()  # Force immediate UI update
         st.session_state.browser_ready = False
         failures = perform_batch_sync([(trading_pair, i) for i in intervals], start_dt, end_dt, connector, api_url, api_auth, progress_bar_placeholder, status_table_placeholder)
         if get_data_button and not failures:
@@ -163,6 +164,7 @@ if sync_top10:
     if not intervals: st.error("Please select at least one interval.")
     else:
         init_task_status(TOP_10_PAIRS, intervals, connector, start_date, end_date)
+        redraw_table()  # Force immediate UI update
         start_dt = datetime.combine(start_date, time.min)
         end_dt = datetime.combine(end_date, time.max)
         perform_batch_sync([(p, i) for p in TOP_10_PAIRS for i in intervals], start_dt, end_dt, connector, api_url, api_auth, progress_bar_placeholder, status_table_placeholder)

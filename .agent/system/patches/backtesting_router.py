@@ -15,40 +15,115 @@ def run_process_safe_backtest(config_data: dict, start: int, end: int, resolutio
     """
     Standalone function running in a separate, clean process (via spawn).
     Enforces a 'Network Blackout' to prevent any asyncio loop collisions.
+    Includes robustness patch for Binance Geo-Blocking (HTTP 451).
     """
     # 1. NETWORK BLACKOUT: Mock all network-related modules BEFORE any HB imports
     from unittest.mock import MagicMock, AsyncMock
     import sys
     import asyncio
+    import json
     
-    # Mocking aiohttp to be async-friendly
-    mock_aiohttp = MagicMock()
-    mock_session = AsyncMock()
-    mock_session.__aenter__.return_value = mock_session
-    mock_aiohttp.ClientSession.return_value = mock_session
-    sys.modules['aiohttp'] = mock_aiohttp
+    # [ROBUSTNESS PATCH v2] Aggressively UNLOAD hummingbot modules to force re-import
+    # This ensures our patches apply even if parent process already imported them.
+    modules_to_unload = [
+        'hummingbot.connector.exchange.binance.binance_exchange',
+        'hummingbot.connector.exchange_py_base',
+        'hummingbot.core.web_assistant.rest_assistant',
+        'hummingbot.core.web_assistant.connections.factory',
+        'hummingbot.strategy_v2.backtesting.backtesting_engine_base',
+        'aiohttp'
+    ]
+    for mod in modules_to_unload:
+        sys.modules.pop(mod, None)
+
+    try:
+        import aiohttp
+        
+        # Determine the symbol we need to mock from config
+        target_pair = "BTC-USDT"
+        if isinstance(config_data, dict):
+            target_pair = config_data.get("trading_pair", "BTC-USDT")
+        
+        # Construct simplified ExchangeInfo & BookTicker
+        base, quote = target_pair.split("-")
+        symbol = f"{base}{quote}"
+        
+        mock_exchange_info = {
+            "timezone": "UTC",
+            "serverTime": 1700000000000,
+            "rateLimits": [],
+            "exchangeFilters": [],
+            "symbols": [{
+                "symbol": symbol,
+                "status": "TRADING",
+                "baseAsset": base,
+                "baseAssetPrecision": 8,
+                "quoteAsset": quote,
+                "quotePrecision": 8,
+                "quoteAssetPrecision": 8,
+                "baseCommissionPrecision": 8,
+                "quoteCommissionPrecision": 8,
+                "orderTypes": ["LIMIT", "MARKET"],
+                "icebergAllowed": True,
+                "ocoAllowed": True,
+                "quoteOrderQtyMarketAllowed": True,
+                "allowTrailingStop": True,
+                "isSpotTradingAllowed": True,
+                "isMarginTradingAllowed": True,
+                "filters": [
+                    {"filterType": "PRICE_FILTER", "minPrice": "0.00000001", "maxPrice": "1000000.00000000", "tickSize": "0.00000001"},
+                    {"filterType": "LOT_SIZE", "minQty": "0.00000100", "maxQty": "90000000.00000000", "stepSize": "0.00000100"},
+                    {"filterType": "MIN_NOTIONAL", "minNotional": "0.00010000"},
+                    {"filterType": "MARKET_LOT_SIZE", "minQty": "0.00000000", "maxQty": "100000.00000000", "stepSize": "0.00000000"}
+                ],
+                "permissions": ["SPOT", "MARGIN"]
+            }]
+        }
+        
+        mock_book_ticker = {
+             "symbol": symbol,
+             "bidPrice": "10.00000000",
+             "bidQty": "10.00000000",
+             "askPrice": "10.05000000",
+             "askQty": "10.00000000"
+        }
+
+        # Create a smart Mock Response that reacts to URL
+        async def side_effect_get(*args, **kwargs):
+            url = kwargs.get("url") or (args[0] if args else "")
+            mock_resp = AsyncMock()
+            mock_resp.status = 200
+            mock_resp.__aenter__.return_value = mock_resp
+            
+            if "exchangeInfo" in str(url):
+                mock_resp.json.return_value = mock_exchange_info
+            elif "bookTicker" in str(url):
+                mock_resp.json.return_value = mock_book_ticker
+            else:
+                # Default empty JSON for others to prevent crashes
+                mock_resp.json.return_value = {}
+                
+            return mock_resp
+
+        # Create a Mock Session
+        mock_session = AsyncMock()
+        mock_session.get.side_effect = side_effect_get
+        mock_session.request.side_effect = side_effect_get
+        mock_session.__aenter__.return_value = mock_session
+
+        # Force Patch the Class in the LIVE module
+        # This overrides it even if it was imported previously
+        aiohttp.ClientSession = MagicMock(return_value=mock_session)
+    except ImportError:
+        pass # If aiohttp not installed, no need to patch
     
-    # Mocking HB Networking components - MUST use AsyncMock for things that are awaited!
-    mock_sync_mod = MagicMock()
-    mock_sync_class = MagicMock()
-    mock_sync_instance = AsyncMock() 
-    mock_sync_class.get_instance.return_value = mock_sync_instance
-    mock_sync_class.return_value = mock_sync_instance
-    mock_sync_mod.TimeSynchronizer = mock_sync_class
-    sys.modules['hummingbot.connector.time_synchronizer'] = mock_sync_mod
-    
-    # [NEW] Mocking MarketDataProvider and OrderBookTracker to stop background threads/tasks
+    # Mocking HB Networking components
+    sys.modules['hummingbot.connector.time_synchronizer'] = MagicMock()
     sys.modules['hummingbot.data_feed.market_data_provider'] = MagicMock()
     sys.modules['hummingbot.core.data_type.order_book_tracker'] = MagicMock()
-    
-    # Mocking CandlesFactory - candles feeds often have awaited start/stop/get methods
-    mock_factory_mod = MagicMock()
-    mock_factory_class = MagicMock()
-    mock_factory_class.get_candle.return_value = AsyncMock()
-    mock_factory_mod.CandlesFactory = mock_factory_class
-    sys.modules['hummingbot.data_feed.candles_feed.candles_factory'] = mock_factory_mod
+    sys.modules['hummingbot.data_feed.candles_feed.candles_factory'] = MagicMock()
 
-    # 2. Delayed imports of HB logic (now safe)
+    # 2. Delayed imports of HB logic (now safe because we unloaded them)
     from hummingbot.strategy_v2.backtesting.backtesting_engine_base import BacktestingEngineBase
     from config import settings
 
@@ -565,3 +640,21 @@ async def batch_run_backtesting(batch_configs: list[BacktestingConfig]):
             final_results.append(res)
 
     return {"results": final_results}
+
+@router.post("/gc")
+def force_gc():
+    """Forces garbage collection and releases unallocated memory to OS."""
+    import gc
+    import ctypes
+    
+    # Python GC
+    n = gc.collect()
+    
+    # Libc Malloc Trim (Linux only) - Releases free heap to OS
+    try:
+        libc = ctypes.CDLL("libc.so.6")
+        libc.malloc_trim(0)
+    except:
+        pass
+        
+    return {"status": "success", "gc_objects_collected": n}
