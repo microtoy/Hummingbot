@@ -804,8 +804,8 @@ class StrategyValidator:
             "",
             "## 📋 Summary",
             "",
-            "| Strategy | OOS Test | Sensitivity | Walk-Forward | Verdict |",
-            "|----------|----------|-------------|--------------|---------|",
+            "| Strategy | OOS | Sens | WF | MC | Stab | Verdict |",
+            "|----------|-----|------|----|----|------|---------|",
         ]
         
         for r in all_results:
@@ -813,10 +813,12 @@ class StrategyValidator:
             oos = "✅" if r['oos']['passed'] else "❌"
             sens = "✅" if r['sensitivity']['passed'] else "❌"
             wf = "✅" if r['walkforward']['passed'] else "❌"
+            mc = "✅" if r['monte_carlo']['passed'] else "❌"
+            stab = "✅" if r['stability']['passed'] else "❌"
             verdict = "**VALIDATED**" if r['overall_passed'] else "REJECTED"
             
-            config = f"{s['pair']} (Fast {s['fast_ma']}/Slow {s['slow_ma']}/{s['interval']})"
-            lines.append(f"| {config} | {oos} | {sens} | {wf} | {verdict} |")
+            config = f"{s['pair']} {s['fast_ma']}/{s['slow_ma']}/{s['interval']}"
+            lines.append(f"| {config} | {oos} | {sens} | {wf} | {mc} | {stab} | {verdict} |")
         
         lines.append("")
         lines.append("---")
@@ -849,6 +851,22 @@ class StrategyValidator:
             wf = r['walkforward']
             lines.append(f"**Walk-Forward Analysis**: {'✅ PASS' if wf['passed'] else '❌ FAIL'}")
             lines.append(f"- Avg Walk-Forward Efficiency: {wf.get('avg_wfe', 0):.1%}")
+            lines.append("")
+            
+            # Monte Carlo
+            mc = r['monte_carlo']
+            lines.append(f"**Monte Carlo Simulation**: {'✅ PASS' if mc['passed'] else '❌ FAIL'}")
+            lines.append(f"- Mean PnL: {mc.get('mean_pnl', 0):.1f}%")
+            lines.append(f"- 5th Percentile (P5): {mc.get('percentile_5', 0):.1f}%")
+            lines.append(f"- Strategy risk from order luck is low: {'YES' if mc['passed'] else 'NO'}")
+            lines.append("")
+            
+            # Stability
+            stab = r['stability']
+            lines.append(f"**Parameter Stability**: {'✅ PASS' if stab['passed'] else '❌ FAIL'}")
+            lines.append(f"- Center PnL: {stab.get('center_pnl', 0):.1f}%")
+            lines.append(f"- Neighbor Avg PnL: {stab.get('mean_neighbor_pnl', 0):.1f}%")
+            lines.append(f"- Stability Type: {stab.get('stability_type', 'unknown').upper()}")
             lines.append("")
             lines.append("---")
             lines.append("")
