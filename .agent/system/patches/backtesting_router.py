@@ -12,6 +12,8 @@ import os
 import shutil
 from concurrent.futures import ProcessPoolExecutor
 from typing import Optional, List
+import numpy as np
+import json
 
 # =============================================================================
 # ⚡ HIGH-PERFORMANCE CPU SATURATION OPTIMIZATIONS
@@ -19,7 +21,8 @@ from typing import Optional, List
 
 # --- GLOBAL PROCESS POOL CONFIGURATION ---
 _GLOBAL_POOL: Optional[ProcessPoolExecutor] = None
-_GLOBAL_POOL_SIZE = int(os.environ.get("TURBO_WORKERS", os.cpu_count() or 4))  # Adaptive to hardware
+_GLOBAL_POOL_SIZE = int(os.environ.get("TURBO_WORKERS", os.cpu_count() or 4))
+_PRELOADED_CANDLES = {}  # Cache in the PARENT process for fork inheritance
 
 # --- FAST LOCAL MIRRORING ---
 # Mirror candle data from slow mounted volume to fast tmpfs at module load
@@ -27,7 +30,7 @@ FAST_DATA_PATH = Path("/tmp/hbot_data")
 MOUNTED_DATA_PATH = Path(hummingbot.data_path())
 
 def _mirror_candles_to_tmpfs():
-    """One-time copy of candle data to high-speed tmpfs for reduced I/O latency."""
+    """One-time copy and conversion of candle data to high-speed tmpfs using Numpy binary format."""
     source = MOUNTED_DATA_PATH / "candles"
     dest = FAST_DATA_PATH / "candles"
     
@@ -35,25 +38,72 @@ def _mirror_candles_to_tmpfs():
         print(f"⚠️ [MIRROR] Source path {source} does not exist, skipping mirroring.")
         return
     
-    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.mkdir(parents=True, exist_ok=True)
+    import numpy as np
+    import pandas as pd
     
-    if dest.exists():
-        # Incremental sync: only copy new/changed files
-        for f in source.glob("*.csv"):
-            dest_file = dest / f.name
-            if not dest_file.exists() or f.stat().st_mtime > dest_file.stat().st_mtime:
-                shutil.copy2(f, dest_file)
-        print(f"✅ [MIRROR] Incremental sync complete to {dest}")
-    else:
-        # Full copy on first run
-        shutil.copytree(source, dest)
-        print(f"✅ [MIRROR] Full copy complete: {source} -> {dest}")
+    csv_files = list(source.glob("*.csv"))
+    print(f"⚡ [MEGA-TURBO] Mirroring {len(csv_files)} files to Numpy Binary Format...")
+    
+    for f in csv_files:
+        npy_file = dest / f.name.replace(".csv", ".npy")
+        meta_file = dest / f.name.replace(".csv", ".json")
+        
+        # Only convert if newer or missing
+        if not npy_file.exists() or f.stat().st_mtime > npy_file.stat().st_mtime:
+            try:
+                df = pd.read_csv(f)
+                if df.empty: continue
+                
+                # Save data as binary numpy (extremely fast)
+                np.save(str(npy_file), df.values)
+                
+                # Save metadata (column names, data types, and coverage)
+                with open(meta_file, 'w') as jf:
+                    import json
+                    json.dump({
+                        "columns": df.columns.tolist(),
+                        "dtypes": {c: str(d) for c, d in df.dtypes.items()},
+                        "min_ts": int(df.timestamp.min()),
+                        "max_ts": int(df.timestamp.max())
+                    }, jf)
+                
+                print(f"  ✅ Converted {f.name} -> .npy")
+            except Exception as e:
+                print(f"  ❌ Failed to convert {f.name}: {e}")
+    
+    print(f"✅ [MIRROR] Mega-Turbo mirroring complete to {dest}")
 
-# Execute mirroring at module load (container startup)
+def _preload_all_candles():
+    """Load all .npy files into memory in the PARENT process for zero-copy fork inheritance."""
+    global _PRELOADED_CANDLES
+    dest = FAST_DATA_PATH / "candles"
+    if not dest.exists(): return
+    
+    for f in dest.glob("*.npy"):
+        try:
+            meta_file = f.with_suffix(".json")
+            if not meta_file.exists(): continue
+            
+            with open(meta_file, 'r') as jf:
+                meta = json.load(jf)
+            
+            # Load as read-only numpy array
+            data = np.load(str(f), mmap_mode='r')
+            _PRELOADED_CANDLES[f.name.replace(".npy", "")] = {
+                "data": data,
+                "meta": meta
+            }
+            print(f"🧠 [PRELOAD] Inheriting {f.name} ({len(data)} rows)")
+        except Exception as e:
+            print(f"⚠️ [PRELOAD ERROR] {f.name}: {e}")
+
+# Execute mirroring and preloading at module load (container startup)
 try:
     _mirror_candles_to_tmpfs()
+    _preload_all_candles()
 except Exception as e:
-    print(f"⚠️ [MIRROR ERROR] {e}")
+    print(f"⚠️ [STARTUP ERROR] {e}")
 
 # --- WORKER INITIALIZER (One-Time Heavy Imports + Network Blackout) ---
 def _turbo_worker_init():
@@ -357,7 +407,13 @@ def run_process_safe_backtest(config_data: dict, start: int, end: int, resolutio
             except: pass
 
     # Run in a fresh loop in this process
-    return asyncio.run(_async_run())
+    try:
+        return asyncio.run(_async_run())
+    except Exception as e:
+        import traceback
+        error_msg = f"❌ [{config_data.get('trading_pair', 'unknown')}] {str(e)}\n{traceback.format_exc()}"
+        print(error_msg)
+        return {"error": error_msg}
 
 
 # Global state for tracking active sync tasks
@@ -895,9 +951,11 @@ def _run_turbo_batch_internal(configs_chunk: list, start: int, end: int, resolut
                 # NOTE: Keep candles_feeds cached for subsequent same-pair simulations
                 # Only clear at END of batch to allow cache reuse within batch
             except Exception as e:
+                import traceback
+                error_msg = f"{str(e)}\n{traceback.format_exc()}"
                 results.append({
                     "trading_pair": config_data.get("trading_pair", "Unknown"),
-                    "error": str(e),
+                    "error": error_msg,
                     "net_pnl": 0, "net_pnl_quote": 0, "accuracy": 0, "sharpe_ratio": 0,
                     "max_drawdown_pct": 0, "profit_factor": 0, "total_positions": 0
                 })

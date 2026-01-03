@@ -12,6 +12,9 @@ import yaml
 
 from hummingbot.client import settings
 from hummingbot.core.data_type.common import LazyDict, TradeType
+
+# ⚡ MEGA-TURBO: Persistent mounted data path for fallback
+MOUNTED_DATA_PATH = "/opt/conda/envs/hummingbot-api/lib/python3.12/site-packages/data"
 from hummingbot.data_feed.candles_feed.data_types import CandlesConfig
 from hummingbot.exceptions import InvalidController
 from hummingbot.strategy_v2.backtesting.backtesting_data_provider import BacktestingDataProvider
@@ -146,25 +149,63 @@ class BacktestingEngineBase:
         for config in self.controller.config.candles_config:
             await self._get_candles_with_cache(config)
 
-    def _load_candle_slice(self, cache_file: Path, needed_start: int, needed_end: int) -> pd.DataFrame:
-        """Loads only the required slice of a CSV file using indexed seeking logic."""
+    def _load_candle_slice(self, cache_file: Path, needed_start: int, doctors_end: int) -> pd.DataFrame:
+        """Loads only the required slice of a CSV or .npy file using indexed seeking logic."""
+        import numpy as np
+        import json
+        
+        npy_file = cache_file.with_suffix(".npy")
+        meta_file = cache_file.with_suffix(".json")
+        
+        # ⚡ MEGA-TURBO: Use .npy binary format if available
+        if npy_file.exists() and meta_file.exists():
+            try:
+                # 1. Load metadata
+                with open(meta_file, 'r') as f:
+                    meta = json.load(f)
+                
+                # 2. Memory-map the numpy array (zero-copy loading)
+                data = np.load(str(npy_file), mmap_mode='r')
+                
+                # 3. Find slice indices
+                ts_col_idx = meta["columns"].index("timestamp")
+                timestamps = data[:, ts_col_idx]
+                
+                mask = (timestamps >= needed_start) & (timestamps <= doctors_end)
+                if not mask.any():
+                    return pd.DataFrame()
+                
+                start_idx = np.flatnonzero(mask)[0]
+                end_idx = np.flatnonzero(mask)[-1] + 1
+                
+                # 4. Create DataFrame from slice
+                df = pd.DataFrame(data[start_idx:end_idx], columns=meta["columns"])
+                
+                # 5. Restore dtypes
+                for col, dtype in meta["dtypes"].items():
+                    try:
+                        df[col] = df[col].astype(dtype)
+                    except:
+                        pass
+                
+                return df
+            except Exception as e:
+                print(f"⚠️ [NPY LOAD ERROR] {e}. Falling back to CSV.")
+
+        # Fallback to CSV slicing (legacy)
         try:
-            # Step 1: Extremely fast scan of just the timestamp column to find indices
             ts_df = pd.read_csv(cache_file, usecols=["timestamp"])
-            mask = (ts_df["timestamp"] >= needed_start) & (ts_df["timestamp"] <= needed_end)
+            mask = (ts_df["timestamp"] >= needed_start) & (ts_df["timestamp"] <= doctors_end)
             if not mask.any():
                 return pd.DataFrame()
             
             start_idx = int(mask.idxmax())
             count = int(mask.sum())
-            
-            # Step 2: Reload only the relevant chunk using the found indices
-            # skiprows=range(1, start_idx + 1) keeps row 0 (header) and skips up to start_idx
             return pd.read_csv(cache_file, header=0, skiprows=range(1, start_idx + 1), nrows=count)
         except Exception as e:
-            print(f"⚠️ [SLICE ERROR] Falling back to full load: {e}")
+            print(f"⚠️ [SLICE ERROR] Full load: {e}")
             full_df = pd.read_csv(cache_file)
-            return full_df[(full_df["timestamp"] >= needed_start) & (full_df["timestamp"] <= needed_end)].copy()
+            return full_df[(full_df["timestamp"] >= needed_start) & (full_df["timestamp"] <= doctors_end)].copy()
 
     async def _get_candles_with_cache(self, config: CandlesConfig) -> pd.DataFrame:
         """Helper to get candles with extreme efficiency using binary metadata checks and append mode."""
@@ -187,28 +228,57 @@ class BacktestingEngineBase:
         
         # --- FAST BINARY METADATA CHECK ---
         min_ts, max_ts = None, None
-        if cache_file.exists() and cache_file.stat().st_size > 0:
+        
+        # 1. Check for mirrored JSON metadata first (Turbo Mode)
+        meta_file = cache_file.with_suffix(".json")
+        if meta_file.exists():
             try:
-                with open(cache_file, 'rb') as f:
-                    # Header
-                    f.readline()
-                    # First data line
-                    first_line = f.readline()
-                    if first_line:
-                        min_ts = int(float(first_line.split(b',')[0]))
-                    
-                    # Last data line (Last 1KB)
-                    f.seek(0, 2)
-                    f_size = f.tell()
-                    f.seek(max(0, f_size - 1024), 0)
-                    last_lines = f.read().splitlines()
-                    if last_lines:
-                        for line in reversed(last_lines):
-                            if line.strip():
-                                max_ts = int(float(line.split(b',')[0]))
-                                break
+                with open(meta_file, 'r') as jf:
+                    meta = json.load(jf)
+                    min_ts = meta.get("min_ts")
+                    max_ts = meta.get("max_ts")
+                if min_ts is not None and max_ts is not None:
+                    print(f"📊 [META] Loaded coverage from JSON for {filename}: {min_ts} -> {max_ts}")
             except Exception as e:
-                print(f"⚠️ [META ERROR] {e}")
+                print(f"⚠️ [META ERROR] {meta_file}: {e}")
+        
+        # 2. Fallback to reading the file itself (CSV or mirroring incomplete)
+        if min_ts is None or max_ts is None:
+            # If cache_file (in tmpfs) doesn't exist, try the original mounted path
+            search_file = cache_file
+            if not search_file.exists():
+                # Try falling back to mounted data path directly if mirror is missing CSV
+                from hummingbot import data_path
+                # Construct original path (mounted)
+                mounted_file = Path(MOUNTED_DATA_PATH) / "candles" / filename
+                if mounted_file.exists():
+                    search_file = mounted_file
+                else:
+                    search_file = None
+
+            if search_file and search_file.exists() and search_file.suffix == ".csv":
+                try:
+                    with open(search_file, 'rb') as f:
+                        # Header
+                        f.readline()
+                        # First data line
+                        first_line = f.readline()
+                        if first_line:
+                            min_ts = int(float(first_line.split(b',')[0]))
+                        
+                        # Last data line (Last 1KB)
+                        f.seek(0, 2)
+                        f_size = f.tell()
+                        f.seek(max(0, f_size - 1024), 0)
+                        last_lines = f.read().splitlines()
+                        if last_lines:
+                            for line in reversed(last_lines):
+                                if line.strip():
+                                    max_ts = int(float(line.split(b',')[0]))
+                                    break
+                    print(f"📊 [DISK] Read coverage from {search_file.name}: {min_ts} -> {max_ts}")
+                except Exception as e:
+                    print(f"⚠️ [DISK ERROR] {e}")
 
         if min_ts is not None and max_ts is not None:
             if min_ts <= needed_start and max_ts >= effective_needed_end - 86400:
@@ -289,12 +359,21 @@ class BacktestingEngineBase:
         while current_ts <= last_ts:
             # --- PROCESS CURRENT TICK ---
             # Update state for the current jump target
-            row = processed_features.loc[current_ts]
-            self.controller.market_data_provider.prices = {connector_key: row.close_bt_decimal}
+            # ⚡ MEGA-TURBO: Avoid .loc[] and .to_dict() in hot loop
+            # Use raw numpy values for max speed
+            current_idx = ts_to_idx[current_ts]
+            row_data = processed_features.iloc[current_idx]
+            
+            # Update provider with float price (avoid Decimal overhead)
+            self.controller.market_data_provider.prices = {connector_key: row_data['close_bt']}
             self.controller.market_data_provider._time = current_ts
-            self.controller.processed_data.update(row.to_dict())
+            
+            # Minimal update to processed_data
+            if isinstance(self.controller.processed_data, dict):
+                self.controller.processed_data.update(row_data)
             
             # Update executors and collect finished ones
+            # ⚡ Optimized iteration
             active_executors_info = []
             simulations_to_remove = []
             for executor in self.active_executor_simulations:
@@ -311,9 +390,9 @@ class BacktestingEngineBase:
             self.controller.executors_info = active_executors_info
             
             # Determine Actions
+            # ⚡ Avoid deep copies or complex objects where possible
             for action in self.controller.determine_executor_actions():
                 if isinstance(action, CreateExecutorAction):
-                    current_idx = ts_to_idx[current_ts]
                     executor_simulation = self.simulate_executor(action.executor_config, processed_features.iloc[current_idx:], trade_cost)
                     if executor_simulation is not None and executor_simulation.close_type != CloseType.FAILED:
                         self.manage_active_executors(executor_simulation)
@@ -433,24 +512,70 @@ class BacktestingEngineBase:
             if bt_col in backtesting_candles.columns:
                 backtesting_candles[base_col] = backtesting_candles[bt_col]
         
-        backtesting_candles["close_bt_decimal"] = backtesting_candles["close"].apply(Decimal)
+        backtesting_candles["close_bt_decimal"] = backtesting_candles["close"] # Float Path: Keep as float
         backtesting_candles.dropna(inplace=True)
+        
+        # ⚡ MEGA-TURBO: Force entire DataFrame to numeric to avoid Decimal leakage from features
+        for col in backtesting_candles.columns:
+            if col != "timestamp":
+                try:
+                    # Force conversion to float64, even for Decimal objects
+                    backtesting_candles[col] = backtesting_candles[col].astype(float)
+                except Exception as e:
+                    # Fallback for columns that really aren't numeric
+                    try:
+                        backtesting_candles[col] = pd.to_numeric(backtesting_candles[col], errors='coerce')
+                    except: pass
+        
         self.controller.processed_data["features"] = backtesting_candles
         return backtesting_candles
+
+    def _floatify_config(self, config):
+        """Recursively converts all Decimal fields in a config object to floats, 
+        bypassing Pydantic validation to prevent casting back to Decimal."""
+        from decimal import Decimal
+        from types import MappingProxyType
+        if config is None:
+            return None
+            
+        # 1. Handle objects (Pydantic models, etc.)
+        if hasattr(config, "__dict__"):
+            # Skip objects with immutable __dict__ (e.g., frozen dataclasses, certain enums)
+            if isinstance(config.__dict__, MappingProxyType):
+                return config
+            try:
+                # Update __dict__ directly to avoid triggering Pydantic validation
+                for key, value in list(config.__dict__.items()):
+                    if isinstance(value, Decimal):
+                        config.__dict__[key] = float(value)
+                    elif isinstance(value, (list, tuple)):
+                        new_list = [float(v) if isinstance(v, Decimal) else self._floatify_config(v) for v in value]
+                        config.__dict__[key] = new_list
+                    elif hasattr(value, "__dict__") or isinstance(value, dict):
+                        self._floatify_config(value)
+            except TypeError:
+                # If __dict__ is not modifiable, skip this object
+                pass
+        
+        # 2. Handle dicts
+        elif isinstance(config, dict):
+            for key, value in config.items():
+                if isinstance(value, Decimal):
+                    config[key] = float(value)
+                elif isinstance(value, (list, tuple)):
+                    config[key] = [float(v) if isinstance(v, Decimal) else self._floatify_config(v) for v in value]
+                elif isinstance(value, dict) or hasattr(value, "__dict__"):
+                    self._floatify_config(value)
+        return config
 
     def simulate_executor(self, config: Union[PositionExecutorConfig, DCAExecutorConfig], df: pd.DataFrame,
                           trade_cost: float) -> Optional[ExecutorSimulation]:
         """
-        Simulates the execution of a trading strategy given a configuration.
-
-        Args:
-            config (PositionExecutorConfig): The configuration of the executor.
-            df (pd.DataFrame): DataFrame containing the market data from the start time.
-            trade_cost (float): The cost per trade.
-
-        Returns:
-            ExecutorSimulation: The results of the simulation.
+        ⚡ MEGA-TURBO: Ensure all inputs are floats to avoid Decimal type collisions.
         """
+        config = self._floatify_config(config)
+        trade_cost = float(trade_cost)
+        
         if isinstance(config, DCAExecutorConfig):
             return self.dca_executor_simulator.simulate(df, config, trade_cost)
         elif isinstance(config, PositionExecutorConfig):

@@ -60,8 +60,8 @@ class StrategyOptimizer:
         # - Total: 4 * 500 = 2000 configs in flight → 48 workers busy
         # ===================================================================
         if turbo:
-            # ⚡ OPTIMAL CONFIG for 10-core (Benchmarked):
-            # - batch_size=250: Best throughput (50+ sims/sec)
+            # ⚡ MEGA-TURBO SCALE (Verified Precision):
+            # - batch_size=250: Moderate batches for 100k+ runs
             # - workers=2: Optimal pipelining for 10 backend cores
             self.batch_size = batch_size if batch_size else 250
             self.workers = workers if workers else 2
@@ -206,7 +206,7 @@ class StrategyOptimizer:
             # Debug: Check for errors in the results
             for r in valid_results:
                 if "error" in r:
-                    print(f"\n      {r.get('trading_pair', 'Unknown')}: {str(r['error'])[:60]}...", flush=True)
+                    print(f"\n      {r.get('trading_pair', 'Unknown')}: {str(r['error'])}", flush=True)
 
             return [r for r in valid_results if "error" not in r]
         except requests.exceptions.Timeout:

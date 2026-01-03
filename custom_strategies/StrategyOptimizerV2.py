@@ -25,6 +25,7 @@ import requests
 from requests.auth import HTTPBasicAuth
 from datetime import datetime, timedelta
 import os
+import time
 import json
 import numpy as np
 from typing import Dict, List, Optional
@@ -36,10 +37,26 @@ optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 # --- CONFIGURATION ---
 API_HOST = os.getenv("API_HOST", os.getenv("BACKEND_API_HOST", "localhost"))
-API_URL = f"http://{API_HOST}:8000/backtesting/batch-run"
-GC_URL = f"http://{API_HOST}:8000/backtesting/gc"
 AUTH = HTTPBasicAuth("admin", "admin")
 OUTPUT_DIR = "/hummingbot-api/bots/controllers/custom/optimization_reports_v2"
+
+class Stats:
+    """Track runtime performance."""
+    def __init__(self):
+        self.start_time = time.time()
+        self.sims_completed = 0
+        self.errors = 0
+        self.best_pnl = -999.0
+        self.best_pair = "N/A"
+        self.last_update = time.time()
+
+    @property
+    def elapsed(self):
+        return time.time() - self.start_time
+
+    @property
+    def sims_per_sec(self):
+        return self.sims_completed / self.elapsed if self.elapsed > 0 else 0
 
 # Top tokens to optimize
 TOP_TOKENS = [
@@ -53,18 +70,30 @@ class OptunaStrategyOptimizer:
     Optuna-powered Strategy Optimizer using Bayesian optimization.
     """
     
-    def __init__(self, pair: str, n_trials: int = 200, days: int = 360):
+    def __init__(self, pair: str, n_trials: int = 200, days: int = 360, turbo: bool = True, workers: int = 2, batch_size: int = 250):
         """
         Args:
             pair: Trading pair (e.g., "ADA-USDT")
             n_trials: Number of optimization trials
             days: Days of historical data for backtesting
+            turbo: Whether to use Mega-Turbo optimized path
+            workers: Number of parallel Optuna workers
+            batch_size: Size of batches for parallel optimization
         """
         self.pair = pair
         self.n_trials = n_trials
         self.days = days
+        self.turbo = turbo
+        self.workers = workers
+        self.batch_size = batch_size
         self.report_id = datetime.now().strftime("%Y%m%d_%H%M")
         self.best_trials = []
+        self.stats = Stats()
+        
+        # Endpoint switching
+        endpoint = "batch-run-turbo" if turbo else "batch-run"
+        self.api_url = f"http://{API_HOST}:8000/backtesting/{endpoint}"
+        self.gc_url = f"http://{API_HOST}:8000/backtesting/gc"
         
         # Time range for backtesting
         self.start_ts, self.end_ts = self._get_time_range(days)
@@ -89,8 +118,8 @@ class OptunaStrategyOptimizer:
         
         try:
             response = requests.post(
-                API_URL,
-                json=[payload],
+                self.api_url,
+                json=[payload], # batch-run-turbo always expects a list
                 auth=AUTH,
                 timeout=300
             )
@@ -103,7 +132,7 @@ class OptunaStrategyOptimizer:
             return {"error": str(e), "net_pnl": 0, "sharpe_ratio": 0}
     
     def _run_batch(self, configs: list) -> list:
-        """Run multiple backtests in parallel via batch API (uses 10 cores)."""
+        """Run multiple backtests in parallel via batch API."""
         payloads = [{
             "config": config,
             "start_time": self.start_ts,
@@ -114,14 +143,14 @@ class OptunaStrategyOptimizer:
         
         try:
             response = requests.post(
-                API_URL,
+                self.api_url,
                 json=payloads,
                 auth=AUTH,
-                timeout=600
+                timeout=1200 # Increased for larger batches
             )
             if response.status_code == 200:
                 return response.json().get("results", [])
-            return [{"error": "API Error", "net_pnl": 0, "sharpe_ratio": 0}] * len(configs)
+            return [{"error": f"API Error {response.status_code}", "net_pnl": 0, "sharpe_ratio": 0}] * len(configs)
         except Exception as e:
             return [{"error": str(e), "net_pnl": 0, "sharpe_ratio": 0}] * len(configs)
     
@@ -177,10 +206,19 @@ class OptunaStrategyOptimizer:
         result = self._run_backtest(config)
         
         # Extract metrics
+        if "error" in result:
+            self.stats.errors += 1
+            return -1.0 # Penalize errors
+            
         sharpe = float(result.get("sharpe_ratio", 0))
         pnl = float(result.get("net_pnl", 0)) * 100
         drawdown = abs(float(result.get("max_drawdown_pct", 0)))
         trades = int(result.get("total_positions", 0))
+        
+        # Update Stats
+        self.stats.sims_completed += 1
+        if pnl > self.stats.best_pnl:
+            self.stats.best_pnl = pnl
         
         # Store result attributes for later analysis
         trial.set_user_attr("pnl", pnl)
@@ -244,21 +282,22 @@ class OptunaStrategyOptimizer:
                       f"PnL: {best.user_attrs.get('pnl', 0):.1f}%")
         
         # Run optimization
-        print(f"⏳ Starting optimization...")
+        print(f"⏳ Starting optimization with {self.workers} parallel workers...")
         study.optimize(
             self._objective,
             n_trials=self.n_trials,
-            n_jobs=1,  # Sequential to respect API limits
+            n_jobs=self.workers,  
             callbacks=[callback],
             show_progress_bar=False
         )
         
         # Cleanup
         try:
-            requests.post(GC_URL, auth=AUTH, timeout=10)
+            requests.post(self.gc_url, auth=AUTH, timeout=10)
         except:
             pass
         
+        elapsed = self.stats.elapsed
         # Extract top trials
         trials = study.trials
         valid_trials = [t for t in trials if t.value is not None and t.value > 0]
@@ -286,10 +325,10 @@ class OptunaStrategyOptimizer:
         # Final report
         print(f"\n{'='*50}")
         print(f"✅ OPTIMIZATION COMPLETE")
-        print(f"Elapsed Time: {int(self.elapsed_time//60)}m {int(self.elapsed_time%60)}s")
+        print(f"Elapsed Time: {int(elapsed//60)}m {int(elapsed%60)}s")
         print(f"{'='*50}")
         
-        self.generate_report(study, self.elapsed_time)
+        report_path = self.generate_report(study, elapsed)
         
         if top_results:
             best = top_results[0]
@@ -351,17 +390,21 @@ class OptunaStrategyOptimizer:
                     fast_ma, slow_ma, interval, stop_loss, take_profit
                 ))
             
-            # Run batch in parallel (uses 10 cores)
+            # Run batch in parallel
             results = self._run_batch(configs)
             
             # Process results
             for i, result in enumerate(results):
-                if "error" not in result:
+                if isinstance(result, dict) and "error" not in result:
                     sharpe = float(result.get("sharpe_ratio", 0))
                     pnl = float(result.get("net_pnl", 0)) * 100
                     drawdown = abs(float(result.get("max_drawdown_pct", 0)))
                     trades = int(result.get("total_positions", 0))
                     
+                    # Update Stats
+                    self.stats.sims_completed += 1
+                    if pnl > self.stats.best_pnl: self.stats.best_pnl = pnl
+
                     # Filter valid results
                     if trades >= 10 and sharpe > 0:
                         all_results.append({
@@ -376,6 +419,8 @@ class OptunaStrategyOptimizer:
                             "stop_loss": configs[i]["stop_loss"],
                             "take_profit": configs[i]["take_profit"]
                         })
+                else:
+                    self.stats.errors += 1
             
             # Progress
             valid_count = len([r for r in all_results if r['sharpe'] > 0])
@@ -383,7 +428,7 @@ class OptunaStrategyOptimizer:
         
         # Cleanup
         try:
-            requests.post(GC_URL, auth=AUTH, timeout=10)
+            requests.post(self.gc_url, auth=AUTH, timeout=10)
         except:
             pass
         
@@ -408,27 +453,26 @@ class OptunaStrategyOptimizer:
         return self.best_trials
     
     def generate_report(self, study, total_elapsed=0):
-        df = study.trials_dataframe()
-        best_trial = study.best_trial
-        
         # Technical Summary Stats
-        total_trials = len(df)
-        success_trials = len(df[df.state == "COMPLETE"])
-        avg_time = (total_elapsed / success_trials) if success_trials > 0 else 0
+        total_trials = self.stats.sims_completed
+        errors = self.stats.errors
+        avg_time = (total_elapsed / total_trials) if total_trials > 0 else 0
 
         lines = [
-            f"# Optimization Report (V2 Stability-Aware)",
+            f"# Optimization Report (V2 Optuna)",
             f"**Date**: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
-            f"**Study Name**: {study.study_name}\n",
-            f"## Technical Summary",
+            f"**Study Name**: {study.study_name if study else 'Parallel'}\n",
+            f"## Performance Summary",
+            f"- **Mode**: {'⚡ MEGA-TURBO' if self.turbo else '🏠 STANDARD'}",
             f"- **Concurrency**: {self.workers} Workers | {self.batch_size} Batch Size",
-            f"- **Trials**: {success_trials} successful / {total_trials} attempted",
+            f"- **Total Simulations**: {total_trials}",
+            f"- **Errors**: {errors}",
             f"- **Total Time**: {int(total_elapsed // 60)}m {int(total_elapsed % 60)}s",
-            f"- **Efficiency**: {avg_time:.2f}s per successful trial\n",
-            f"## Best Parameters",
+            f"- **Throughput**: {self.stats.sims_per_sec:.2f} sims/sec\n",
+            f"## Strategy Parameters",
             f"**Pair**: {self.pair}",
-            f"**Trials**: {self.n_trials}",
-            f"**Algorithm**: TPE (Bayesian Optimization)",
+            f"**Data Range**: {self.days} days",
+            f"**Method**: {'Bayesian (TPE)' if study else 'Random Search'}",
             "",
             "---",
             "",
@@ -452,7 +496,7 @@ class OptunaStrategyOptimizer:
             "",
             "## 💡 Key Insights",
             "",
-            "### Best Parameters",
+            "### Best Configuration",
         ])
         
         if self.best_trials:
@@ -466,13 +510,14 @@ class OptunaStrategyOptimizer:
             ])
         
         # Save report
-        report_path = f"{OUTPUT_DIR}/optuna_{self.pair}_{self.report_id}.md"
+        suffix = "optuna" if study else "parallel"
+        report_path = f"{OUTPUT_DIR}/{suffix}_{self.pair}_{self.report_id}.md"
         with open(report_path, 'w') as f:
             f.write('\n'.join(lines))
         
         abs_path = os.path.abspath(report_path)
         host_path = os.getenv("HOST_PATH")
-        display_path = abs_path.replace("/home/dashboard", host_path) if host_path else abs_path
+        display_path = abs_path.replace("/hummingbot-api/bots/controllers/custom", f"{host_path}/custom_strategies") if host_path else abs_path
         print(f"\n📝 Report saved: {report_path}")
         print(f"View Report: file://{display_path}")
         return report_path
@@ -484,6 +529,11 @@ def main():
     parser.add_argument("--all", action="store_true", help="Optimize all top tokens")
     parser.add_argument("--n_trials", type=int, default=200, help="Number of trials per pair")
     parser.add_argument("--days", type=int, default=360, help="Days of data for backtesting")
+    parser.add_argument("--workers", type=int, default=2, help="Parallel Optuna trials")
+    parser.add_argument("--batch_size", type=int, default=250, help="Sims per API call")
+    parser.add_argument("--turbo", action="store_true", default=True, help="Use Mega-Turbo path")
+    parser.add_argument("--no_turbo", action="store_false", dest="turbo", help="Disable Mega-Turbo")
+    parser.add_argument("--parallel", action="store_true", help="Use random parallel search instead of TPE")
     
     args = parser.parse_args()
     
@@ -507,10 +557,16 @@ def main():
         optimizer = OptunaStrategyOptimizer(
             pair=pair,
             n_trials=args.n_trials,
-            days=args.days
+            days=args.days,
+            turbo=args.turbo,
+            workers=args.workers,
+            batch_size=args.batch_size
         )
-        results = optimizer.optimize()
-        optimizer.generate_report()
+        if args.parallel:
+            results = optimizer.optimize_parallel(batch_size=args.batch_size)
+            optimizer.generate_report(None, optimizer.stats.elapsed)
+        else:
+            results = optimizer.optimize()
         all_results.extend(results)
     
     # Final summary
