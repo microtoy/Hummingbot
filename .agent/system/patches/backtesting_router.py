@@ -887,19 +887,10 @@ def _run_turbo_batch_internal(configs_chunk: list, start: int, end: int, resolut
                     "max_drawdown_pct": float(summary.get("max_drawdown_pct", 0)),
                     "profit_factor": float(summary.get("profit_factor", 0)),
                     "total_positions": int(summary.get("total_positions", 0)),
-                    # "results": summary, # Keep summary if needed, but it's small
-                    # "config": config_data, # Keep config if needed
                     "performance": bt_result.get("performance", {})
                 })
-                
-                # ⚡ CLEAR HEAVY BUFFERS IMMEDIATELY
-                if hasattr(_LOCAL_ENGINE.backtesting_data_provider, "candles_feeds"):
-                    _LOCAL_ENGINE.backtesting_data_provider.candles_feeds.clear()
-                
-                # Force release memory from the finished simulation object
-                del bt_result
-                import gc
-                gc.collect()
+                # NOTE: Keep candles_feeds cached for subsequent same-pair simulations
+                # Only clear at END of batch to allow cache reuse within batch
             except Exception as e:
                 results.append({
                     "trading_pair": config_data.get("trading_pair", "Unknown"),
@@ -907,6 +898,12 @@ def _run_turbo_batch_internal(configs_chunk: list, start: int, end: int, resolut
                     "net_pnl": 0, "net_pnl_quote": 0, "accuracy": 0, "sharpe_ratio": 0,
                     "max_drawdown_pct": 0, "profit_factor": 0, "total_positions": 0
                 })
+        
+        # ⚡ BATCH-LEVEL CLEANUP: Only GC once per batch to minimize overhead
+        if hasattr(_LOCAL_ENGINE.backtesting_data_provider, "candles_feeds"):
+            _LOCAL_ENGINE.backtesting_data_provider.candles_feeds.clear()
+        import gc
+        gc.collect()
         
         return results
     
