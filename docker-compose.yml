@@ -42,7 +42,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 64G
+          memory: 16G
     depends_on:
       - postgres
   emqx:
