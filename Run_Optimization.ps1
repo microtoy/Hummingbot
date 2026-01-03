@@ -45,15 +45,9 @@ if ($option -eq "1") {
     exit 1
 }
 
-Write-Host ""
-$use_turbo = Read-Host "🚀 Use Turbo Mode for 10x speed? (Requires 48+ cores) [Y/n]"
-if ([string]::IsNullOrWhiteSpace($use_turbo) -or $use_turbo -eq "y" -or $use_turbo -eq "Y") {
-    $TURBO_FLAG = "--turbo"
-    Write-Host "⚡ Turbo Mode ENABLED" -ForegroundColor Green
-} else {
-    $TURBO_FLAG = ""
-    Write-Host "Legacy Mode enabled"
-}
+# Turbo Mode is enabled by default for maximum performance
+$TURBO_FLAG = "--turbo"
+Write-Host "⚡ Turbo Mode ENABLED" -ForegroundColor Green
 
 Write-Host ""
 Write-Host "🚀 Starting detailed analysis..." -ForegroundColor Cyan

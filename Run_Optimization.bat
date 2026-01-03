@@ -48,16 +48,9 @@ if "%option%"=="1" (
     exit /b 1
 )
 
-echo.
-set /p use_turbo="🚀 Use Turbo Mode for 10x speed? (Requires 48+ cores) [Y/n]: "
-if "%use_turbo%"=="" set use_turbo=y
-if /i "%use_turbo%"=="y" (
-    set TURBO_FLAG=--turbo
-    echo ⚡ Turbo Mode ENABLED
-) else (
-    set TURBO_FLAG=
-    echo Legacy Mode enabled
-)
+:: Turbo Mode is enabled by default for maximum performance
+set TURBO_FLAG=--turbo
+echo ⚡ Turbo Mode ENABLED
 
 echo.
 echo 🚀 Starting detailed analysis...

@@ -845,8 +845,9 @@ def _run_turbo_batch_internal(configs_chunk: list, start: int, end: int, resolut
                     return _CANDLE_CACHE[key]
                 
                 df = await original_method(config)
-                # Only cache if small enough to not cause OOM across 48 workers
-                if df is not None and not df.empty and len(df) < 100000:
+                # Only cache if small enough to not cause OOM across workers
+                # 64GB RAM can safely hold 1M rows (~50MB) x 10 cores
+                if df is not None and not df.empty and len(df) < 1000000:
                     _CANDLE_CACHE[key] = df
                 return df
                 

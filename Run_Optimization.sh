@@ -46,15 +46,9 @@ case $option in
         ;;
 esac
 
-echo ""
-read -p "🚀 Use Turbo Mode for 10x speed? (Requires 48+ cores) [Y/n]: " use_turbo
-if [[ -z "$use_turbo" || "$use_turbo" =~ ^([yY][eE][sS]|[yY])$ ]]; then
-    TURBO_FLAG="--turbo"
-    echo "⚡ Turbo Mode ENABLED"
-else
-    TURBO_FLAG=""
-    echo "Legacy Mode enabled"
-fi
+# Turbo Mode is enabled by default for maximum performance
+TURBO_FLAG="--turbo"
+echo "⚡ Turbo Mode ENABLED"
 
 echo ""
 echo "🚀 Starting detailed analysis..."
