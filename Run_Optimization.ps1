@@ -27,8 +27,8 @@ $option = Read-Host "Select Option [1/2]"
 
 if ($option -eq "1") {
     $MODE = "discovery"
-    $DAYS = Read-Host "Enter number of days check (default 90)"
-    if ([string]::IsNullOrWhiteSpace($DAYS)) { $DAYS = "90" }
+    $DAYS = Read-Host "Enter number of days check (default 360)"
+    if ([string]::IsNullOrWhiteSpace($DAYS)) { $DAYS = "360" }
     $ITER = Read-Host "Enter iterations per coin (default 20)"
     if ([string]::IsNullOrWhiteSpace($ITER)) { $ITER = "20" }
     $TOKENS = "ALL"
@@ -46,8 +46,8 @@ if ($option -eq "1") {
 }
 
 Write-Host ""
-$use_turbo = Read-Host "🚀 Use Turbo Mode for 10x speed? (Requires 48+ cores) [y/N]"
-if ($use_turbo -eq "y" -or $use_turbo -eq "Y") {
+$use_turbo = Read-Host "🚀 Use Turbo Mode for 10x speed? (Requires 48+ cores) [Y/n]"
+if ([string]::IsNullOrWhiteSpace($use_turbo) -or $use_turbo -eq "y" -or $use_turbo -eq "Y") {
     $TURBO_FLAG = "--turbo"
     Write-Host "⚡ Turbo Mode ENABLED" -ForegroundColor Green
 } else {

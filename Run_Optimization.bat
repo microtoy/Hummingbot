@@ -30,8 +30,8 @@ set /p option="Select Option [1/2]: "
 
 if "%option%"=="1" (
     set MODE=discovery
-    set /p DAYS="Enter number of days check (default 90): "
-    if "!DAYS!"=="" set DAYS=90
+    set /p DAYS="Enter number of days check (default 360): "
+    if "!DAYS!"=="" set DAYS=360
     set /p ITER="Enter iterations per coin (default 20): "
     if "!ITER!"=="" set ITER=20
     set TOKENS=ALL
@@ -49,7 +49,8 @@ if "%option%"=="1" (
 )
 
 echo.
-set /p use_turbo="🚀 Use Turbo Mode for 10x speed? (Requires 48+ cores) [y/N]: "
+set /p use_turbo="🚀 Use Turbo Mode for 10x speed? (Requires 48+ cores) [Y/n]: "
+if "%use_turbo%"=="" set use_turbo=y
 if /i "%use_turbo%"=="y" (
     set TURBO_FLAG=--turbo
     echo ⚡ Turbo Mode ENABLED

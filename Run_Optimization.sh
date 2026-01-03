@@ -29,8 +29,8 @@ read -p "Select Option [1/2]: " option
 case $option in
     1)
         MODE="discovery"
-        read -p "Enter number of days check (default 90): " DAYS
-        DAYS=${DAYS:-90}
+        read -p "Enter number of days check (default 360): " DAYS
+        DAYS=${DAYS:-360}
         read -p "Enter iterations per coin (default 20): " ITER
         ITER=${ITER:-20}
         TOKENS="ALL"
@@ -47,8 +47,8 @@ case $option in
 esac
 
 echo ""
-read -p "🚀 Use Turbo Mode for 10x speed? (Requires 48+ cores) [y/N]: " use_turbo
-if [[ "$use_turbo" =~ ^([yY][eE][sS]|[yY])$ ]]; then
+read -p "🚀 Use Turbo Mode for 10x speed? (Requires 48+ cores) [Y/n]: " use_turbo
+if [[ -z "$use_turbo" || "$use_turbo" =~ ^([yY][eE][sS]|[yY])$ ]]; then
     TURBO_FLAG="--turbo"
     echo "⚡ Turbo Mode ENABLED"
 else
