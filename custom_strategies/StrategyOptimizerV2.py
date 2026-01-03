@@ -35,8 +35,9 @@ import logging
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 # --- CONFIGURATION ---
-API_URL = "http://localhost:8000/backtesting/batch-run"
-GC_URL = "http://localhost:8000/backtesting/gc"
+API_HOST = os.getenv("API_HOST", os.getenv("BACKEND_API_HOST", "localhost"))
+API_URL = f"http://{API_HOST}:8000/backtesting/batch-run"
+GC_URL = f"http://{API_HOST}:8000/backtesting/gc"
 AUTH = HTTPBasicAuth("admin", "admin")
 OUTPUT_DIR = "/hummingbot-api/bots/controllers/custom/optimization_reports_v2"
 
@@ -277,15 +278,18 @@ class OptunaStrategyOptimizer:
                 "interval": config.get("indicator_interval"),
                 "stop_loss": config.get("stop_loss"),
                 "take_profit": config.get("take_profit"),
-                "trial_number": trial.number
+            "trial_number": trial.number
             })
         
         self.best_trials = top_results
         
-        # Print results
-        print(f"\n{'='*60}")
-        print(f"✅ OPTIMIZATION COMPLETE: {self.pair}")
-        print(f"{'='*60}")
+        # Final report
+        print(f"\n{'='*50}")
+        print(f"✅ OPTIMIZATION COMPLETE")
+        print(f"Elapsed Time: {int(self.elapsed_time//60)}m {int(self.elapsed_time%60)}s")
+        print(f"{'='*50}")
+        
+        self.generate_report(study, self.elapsed_time)
         
         if top_results:
             best = top_results[0]
@@ -403,12 +407,25 @@ class OptunaStrategyOptimizer:
         
         return self.best_trials
     
-    def generate_report(self) -> str:
-        """Generate markdown report of optimization results."""
+    def generate_report(self, study, total_elapsed=0):
+        df = study.trials_dataframe()
+        best_trial = study.best_trial
+        
+        # Technical Summary Stats
+        total_trials = len(df)
+        success_trials = len(df[df.state == "COMPLETE"])
+        avg_time = (total_elapsed / success_trials) if success_trials > 0 else 0
+
         lines = [
-            "# 🧠 Optuna Optimization Report",
-            "",
+            f"# Optimization Report (V2 Stability-Aware)",
             f"**Date**: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+            f"**Study Name**: {study.study_name}\n",
+            f"## Technical Summary",
+            f"- **Concurrency**: {self.workers} Workers | {self.batch_size} Batch Size",
+            f"- **Trials**: {success_trials} successful / {total_trials} attempted",
+            f"- **Total Time**: {int(total_elapsed // 60)}m {int(total_elapsed % 60)}s",
+            f"- **Efficiency**: {avg_time:.2f}s per successful trial\n",
+            f"## Best Parameters",
             f"**Pair**: {self.pair}",
             f"**Trials**: {self.n_trials}",
             f"**Algorithm**: TPE (Bayesian Optimization)",
@@ -453,7 +470,11 @@ class OptunaStrategyOptimizer:
         with open(report_path, 'w') as f:
             f.write('\n'.join(lines))
         
+        abs_path = os.path.abspath(report_path)
+        host_path = os.getenv("HOST_PATH")
+        display_path = abs_path.replace("/home/dashboard", host_path) if host_path else abs_path
         print(f"\n📝 Report saved: {report_path}")
+        print(f"View Report: file://{display_path}")
         return report_path
 
 

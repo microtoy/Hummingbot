@@ -44,23 +44,30 @@ case $option in
         read -p "Enter target tokens (e.g. ETH-USDT,BTC-USDT or ALL): " TOKENS
         TOKENS=${TOKENS:-ALL}
         ;;
-    *)
-        echo "Invalid option"
-        exit 1
-        ;;
 esac
+
+echo ""
+read -p "🚀 Use Turbo Mode for 10x speed? (Requires 48+ cores) [y/N]: " use_turbo
+if [[ "$use_turbo" =~ ^([yY][eE][sS]|[yY])$ ]]; then
+    TURBO_FLAG="--turbo"
+    echo "⚡ Turbo Mode ENABLED"
+else
+    TURBO_FLAG=""
+    echo "Legacy Mode enabled"
+fi
 
 echo ""
 echo "🚀 Starting detailed analysis..."
 echo "--------------------------------------------------------"
 
 # Execute inside Docker
-docker exec -t dashboard /opt/conda/envs/dashboard/bin/python3 \
+docker exec -e HOST_PATH="$(pwd)" -t dashboard /opt/conda/envs/dashboard/bin/python3 \
     /home/dashboard/custom_strategies/StrategyOptimizer.py \
     --mode $MODE \
     --days $DAYS \
     --iter $ITER \
-    --tokens $TOKENS
+    --tokens $TOKENS \
+    $TURBO_FLAG
 
 echo ""
 echo "✅ Done! Reports saved in: custom_strategies/optimization_reports/"

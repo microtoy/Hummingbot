@@ -179,6 +179,7 @@ def run_process_safe_backtest(config_data: dict, start: int, end: int, resolutio
         socket.getaddrinfo = DNS_FAIL
         # No hard socket.socket block here to avoid fragile failures
         import aiohttp
+        from unittest.mock import MagicMock, AsyncMock
     except ImportError:
         pass
 
@@ -880,6 +881,7 @@ def _run_turbo_batch_internal(configs_chunk: list, start: int, end: int, resolut
                 # StrategyOptimizer only needs the summary metrics for the optimization report.
                 results.append({
                     "trading_pair": controller_config.trading_pair,
+                    "config": inner_cfg,
                     "net_pnl": float(summary.get("net_pnl", 0)),
                     "net_pnl_quote": float(summary.get("net_pnl_quote", 0)),
                     "accuracy": float(summary.get("accuracy", 0)),

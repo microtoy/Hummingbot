@@ -29,8 +29,9 @@ from concurrent.futures import ThreadPoolExecutor
 from requests.auth import HTTPBasicAuth
 
 # --- CONFIGURATION ---
-API_URL = "http://localhost:8000/backtesting/batch-run"
-GC_URL = "http://localhost:8000/backtesting/gc"
+API_HOST = os.getenv("API_HOST", os.getenv("BACKEND_API_HOST", "localhost"))
+API_URL = f"http://{API_HOST}:8000/backtesting/batch-run"
+GC_URL = f"http://{API_HOST}:8000/backtesting/gc"
 AUTH = HTTPBasicAuth("admin", "admin")
 OUTPUT_DIR = "/hummingbot-api/bots/controllers/custom/validation_reports"
 

@@ -14,7 +14,7 @@ import pandas as pd
 from requests.auth import HTTPBasicAuth
 
 # --- CONFIGURATION ---
-API_HOST = os.getenv("API_HOST", "localhost")
+API_HOST = os.getenv("API_HOST", os.getenv("BACKEND_API_HOST", "localhost"))
 API_URL = f"http://{API_HOST}:8000/backtesting/batch-run"
 API_URL_TURBO = f"http://{API_HOST}:8000/backtesting/batch-run-turbo"
 AUTH = HTTPBasicAuth("admin", "admin")
@@ -63,8 +63,8 @@ class StrategyOptimizer:
             # ⚡ OPTIMAL CONFIG for 48-core, 56GB RAM:
             # - batch_size=200: Maximizes cache reuse (same pairs grouped together)
             # - workers=4: Prevents API timeout, keeps all 48 cores busy via server pool
-            self.batch_size = batch_size if batch_size else 200
-            self.workers = workers if workers else 4
+            self.batch_size = batch_size if batch_size else 50
+            self.workers = workers if workers else 2
         else:
             # Legacy mode: Conservative settings 
             self.batch_size = batch_size if batch_size else 50
@@ -412,8 +412,11 @@ class StrategyOptimizer:
         self._heartbeat_running = False
         print(f"\nHeartbeat monitor stopped", flush=True)
         
+        run_end_time = time.time()
+        total_elapsed = run_end_time - run_start_time
+        
         print(f"\nOptimization Complete.")
-        self.generate_report(self.results_cache)
+        self.generate_report(self.results_cache, total_elapsed)
 
     def clean_server_memory(self):
         """Trigger backend garbage collection"""
@@ -421,13 +424,19 @@ class StrategyOptimizer:
             requests.post(API_URL.replace("/batch-run", "/gc"), auth=AUTH, timeout=2)
         except: pass
 
-    def generate_report(self, results):
+    def generate_report(self, results, total_elapsed=0):
         if not results:
             print("No results to report.")
             return
 
         df = pd.DataFrame(results)
         
+        # Calculate stats
+        total_sims = self.iterations * len(df["Pair"].unique()) if not df.empty else 0
+        success_sims = len(df)
+        success_rate = (success_sims / total_sims * 100) if total_sims > 0 else 0
+        avg_time = (total_elapsed / success_sims) if success_sims > 0 else 0
+
         # Find "Holy Grails" (>15% PnL, <20% DD)
         grails = df[(df["PnL"] > 15) & (df["Drawdown"].abs() < 20)].sort_values("PnL", ascending=False)
         
@@ -442,6 +451,13 @@ class StrategyOptimizer:
             f.write(f"**Analysis Window**: Last {self.days} days\n")
             f.write(f"**Resolution**: 1m (High Precision)\n\n")
             
+            f.write("## Technical Summary\n")
+            f.write(f"- **Turbo Mode**: {'Enabled ⚡' if self.turbo else 'Disabled'}\n")
+            f.write(f"- **Concurrency**: {self.workers} Workers | {self.batch_size} Batch Size\n")
+            f.write(f"- **Simulations**: {success_sims} successful / {total_sims} sent ({success_rate:.1f}% success)\n")
+            f.write(f"- **Total Time**: {int(total_elapsed // 60)}m {int(total_elapsed % 60)}s\n")
+            f.write(f"- **Efficiency**: {avg_time:.2f}s per successful sim\n\n")
+
             f.write("## Top Performers (Holy Grails)\n")
             f.write("> **Criteria**: PnL > 15% , Max Drawdown < 20%\n\n")
             if not grails.empty:
@@ -478,7 +494,11 @@ class StrategyOptimizer:
             f.write("\n\n## Parameter Instructions\n")
             f.write("Apply these best params in **Dashboard -> Smart Strategy**.\n")
             
+        abs_path = os.path.abspath(md_filename)
+        host_path = os.getenv("HOST_PATH")
+        display_path = abs_path.replace("/home/dashboard", host_path) if host_path else abs_path
         print(f"Report generated: {md_filename}")
+        print(f"View Report: file://{display_path}")
         if not grails.empty:
             print("\nTop Result Preview:")
             print(grails.head(3).to_string(index=False))
