@@ -36,6 +36,7 @@ services:
       # Override specific values for Docker networking
       - BROKER_HOST=emqx
       - DATABASE_URL=postgresql+asyncpg://hbot:hummingbot-api@postgres:5432/hummingbot_api
+      - TZ=Asia/Shanghai
     networks:
       - emqx-bridge
     deploy:

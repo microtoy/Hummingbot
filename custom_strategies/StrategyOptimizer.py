@@ -8,22 +8,26 @@ import os
 import sys
 import threading
 import concurrent.futures
+import concurrent.futures
 from datetime import datetime, timedelta
 import pandas as pd
 from requests.auth import HTTPBasicAuth
 
 # --- CONFIGURATION ---
-API_URL = "http://hummingbot-api:8000/backtesting/batch-run"
+API_HOST = os.getenv("API_HOST", "localhost")
+API_URL = f"http://{API_HOST}:8000/backtesting/batch-run"
+API_URL_TURBO = f"http://{API_HOST}:8000/backtesting/batch-run-turbo"
 AUTH = HTTPBasicAuth("admin", "admin")
-OUTPUT_DIR = "/home/dashboard/custom_strategies/optimization_reports"
+OUTPUT_DIR = "./custom_strategies/optimization_reports"
 TOP_10_TOKENS = [
     "BTC-USDT", "ETH-USDT", "BNB-USDT", "XRP-USDT", "SOL-USDT",
     "ADA-USDT", "AVAX-USDT", "DOGE-USDT", "LINK-USDT", "TRX-USDT"
 ]
 
 class StrategyOptimizer:
-    def __init__(self, mode, days=730, iterations=30, batch_size=None, workers=None):
+    def __init__(self, mode, days=730, iterations=30, batch_size=None, workers=None, turbo=False):
         self.mode = mode
+        self.turbo = turbo  # Use high-performance turbo endpoint
         self.days = days
         self.iterations = iterations
         
@@ -48,9 +52,21 @@ class StrategyOptimizer:
         # - workers=4, batch_size=50: ~205s/batch (4x slower due to 40 processes fighting for 10 cores)
         # ===================================================
         
-        # Optimal Configuration: Let backend fully utilize its 10-core pool
-        self.batch_size = batch_size if batch_size else 50
-        self.workers = workers if workers else 2  # 2 workers = 20 parallel, with pipeline overlap
+        # ============ TURBO MODE DEFAULTS (48-core optimized) ============
+        # NEW ARCHITECTURE: Moderate parallelism + large batches
+        # - Client sends 4 parallel HTTP requests (pipelining)
+        # - Each request contains 500 configs  
+        # - Server splits each batch into 48 chunks for workers
+        # - Total: 4 * 500 = 2000 configs in flight → 48 workers busy
+        # ===================================================================
+        if turbo:
+            self.batch_size = batch_size if batch_size else 100  # Higher batch for 56GB RAM
+            # Adaptive: more workers with more memory headroom
+            self.workers = workers if workers else max(2, cpu_count // 8)
+        else:
+            # Legacy mode: Conservative settings 
+            self.batch_size = batch_size if batch_size else 50
+            self.workers = workers if workers else max(1, cpu_count // 4)
         
         self.start_ts, self.end_ts = self._get_time_range(days)
         self.report_id = datetime.now().strftime("%Y%m%d_%H%M")
@@ -148,17 +164,19 @@ class StrategyOptimizer:
             self.stats["batches_sent"] += 1
             self.stats["last_activity"] = time.time()
         
-        print(f"\n   📤 Batch {batch_num} sending ({len(batch_configs)} sims)...", flush=True)
+        print(f"\n   Batch {batch_num} sending ({len(batch_configs)} sims)...", flush=True)
         
         try:
-            response = requests.post(API_URL, json=batch_configs, auth=AUTH, timeout=600)  # 10 min timeout
+            # Select endpoint based on turbo mode
+            url = API_URL_TURBO if self.turbo else API_URL
+            response = requests.post(url, json=batch_configs, auth=AUTH, timeout=1200)  # 20 min timeout
             elapsed = time.time() - start_time
             
             if response.status_code != 200:
                 with self.stats_lock:
                     self.stats["batches_error"] += 1
                     self.stats["last_activity"] = time.time()
-                print(f"\n   ❌ Batch {batch_num}: API Error {response.status_code} ({elapsed:.1f}s)", flush=True)
+                print(f"\n   Batch {batch_num}: API Error {response.status_code} ({elapsed:.1f}s)", flush=True)
                 return []
             
             valid_results = response.json().get("results", [])
@@ -181,25 +199,25 @@ class StrategyOptimizer:
                             self.stats["best_pnl"] = pnl
                             self.stats["best_pair"] = r.get("trading_pair", "N/A")
             
-            print(f"\n   📥 Batch {batch_num} received: {success_count} ok, {error_count} errors ({elapsed:.1f}s)", flush=True)
+            print(f"\n   Batch {batch_num} received: {success_count} ok, {error_count} errors ({elapsed:.1f}s)", flush=True)
             
             # Debug: Check for errors in the results
             for r in valid_results:
                 if "error" in r:
-                    print(f"\n      ⚠️ {r.get('trading_pair', 'Unknown')}: {str(r['error'])[:60]}...", flush=True)
+                    print(f"\n      {r.get('trading_pair', 'Unknown')}: {str(r['error'])[:60]}...", flush=True)
 
             return [r for r in valid_results if "error" not in r]
         except requests.exceptions.Timeout:
             elapsed = time.time() - start_time
             with self.stats_lock:
                 self.stats["batches_error"] += 1
-            print(f"\n   ⏰ Batch {batch_num}: Timeout after {elapsed:.1f}s", flush=True)
+            print(f"\n   Batch {batch_num}: Timeout after {elapsed:.1f}s", flush=True)
             return []
         except Exception as e:
             elapsed = time.time() - start_time
             with self.stats_lock:
                 self.stats["batches_error"] += 1
-            print(f"\n   ❌ Batch {batch_num}: Exception {str(e)[:50]}... ({elapsed:.1f}s)", flush=True)
+            print(f"\n   Batch {batch_num}: Exception {str(e)[:50]}... ({elapsed:.1f}s)", flush=True)
             return []
 
     def _heartbeat_monitor(self, total_batches, run_start_time):
@@ -240,29 +258,31 @@ class StrategyOptimizer:
             
             # Print heartbeat status
             print(f"\n{'='*60}", flush=True)
-            print(f"💓 HEARTBEAT [{datetime.now().strftime('%H:%M:%S')}] - Elapsed: {elapsed_min}m {elapsed_sec}s", flush=True)
-            print(f"├─ 📤 Sent:     {stats['batches_sent']}/{total_batches} batches (+{sent_delta} in last 30s)", flush=True)
-            print(f"├─ 📥 Received: {stats['batches_received']}/{total_batches} batches (+{recv_delta} in last 30s)", flush=True)
-            print(f"├─ ✅ Success:  {stats['sims_completed']} sims | ❌ Errors: {stats['sims_error']} sims", flush=True)
-            print(f"├─ 🏆 Best:     {stats['best_pair']} (PnL: {stats['best_pnl']:.2f}%)", flush=True)
-            print(f"├─ ⏱️  Idle:     {idle_time:.1f}s since last activity", flush=True)
+            print(f"HEARTBEAT [{datetime.now().strftime('%H:%M:%S')}] - Elapsed: {elapsed_min}m {elapsed_sec}s", flush=True)
+            print(f"├─ Sent:     {stats['batches_sent']}/{total_batches} batches (+{sent_delta} in last 30s)", flush=True)
+            print(f"├─ Received: {stats['batches_received']}/{total_batches} batches (+{recv_delta} in last 30s)", flush=True)
+            print(f"├─ Success:  {stats['sims_completed']} sims | Errors: {stats['sims_error']} sims", flush=True)
+            print(f"├─ Best:     {stats['best_pair']} (PnL: {stats['best_pnl']:.2f}%)", flush=True)
+            print(f"├─ Idle:     {idle_time:.1f}s since last activity", flush=True)
             if eta_min >= 0:
-                print(f"└─ ⏳ ETA:      ~{eta_min}m remaining", flush=True)
+                print(f"└─ ETA:      ~{eta_min}m remaining", flush=True)
             else:
-                print(f"└─ ⏳ ETA:      calculating...", flush=True)
+                print(f"└─ ETA:      calculating...", flush=True)
             print(f"{'='*60}", flush=True)
             
             # Warn if idle too long
             if idle_time > 120:
-                print(f"\n⚠️  WARNING: No activity for {idle_time:.0f}s - backend may be stuck!", flush=True)
+                print(f"\nWARNING: No activity for {idle_time:.0f}s - backend may be stuck!", flush=True)
 
     def run(self, target_tokens=TOP_10_TOKENS):
-        print(f"\n🚀 STRATEGY OPTIMIZER v3.0 (Parallel Edition)")
+        version = "v4.0 (TURBO Edition)" if self.turbo else "v3.0 (Parallel Edition)"
+        print(f"\nSTRATEGY OPTIMIZER {version}")
         print(f"==========================================")
-        print(f"🔹 Mode:       {self.mode.upper()}")
-        print(f"🔹 Concurrency:{self.workers} Workers")
-        print(f"🔹 Parallel:   {self.batch_size} Simultaneous Sims per Req")
-        print(f"🔹 Report ID:  {self.report_id}")
+        print(f"Mode:       {self.mode.upper()}")
+        print(f"Turbo:      {'ENABLED' if self.turbo else 'DISABLED'}")
+        print(f"Concurrency:{self.workers} Workers")
+        print(f"Parallel:   {self.batch_size} Simultaneous Sims per Req")
+        print(f"Report ID:  {self.report_id}")
         print(f"==========================================\n")
         
         # CSV Header
@@ -291,9 +311,9 @@ class StrategyOptimizer:
             batches.append((i, total_configs[i:i+self.batch_size]))
             
         total_sims = len(total_configs)
-        print(f"⚡ Dispatching {len(batches)} batches across {self.workers} threads...", flush=True)
-        print(f"📊 Total simulations: {total_sims} | Tokens: {len(target_tokens)} | Iters/Token: {self.iterations}", flush=True)
-        print(f"⏱️  Start time: {datetime.now().strftime('%H:%M:%S')}", flush=True)
+        print(f"Dispatching {len(batches)} batches across {self.workers} threads...", flush=True)
+        print(f"Total simulations: {total_sims} | Tokens: {len(target_tokens)} | Iters/Token: {self.iterations}", flush=True)
+        print(f"Start time: {datetime.now().strftime('%H:%M:%S')}", flush=True)
         print(f"{'='*60}", flush=True)
 
         # --- PARALLEL EXECUTION LOOP ---
@@ -308,7 +328,7 @@ class StrategyOptimizer:
             daemon=True
         )
         heartbeat_thread.start()
-        print(f"💓 Heartbeat monitor started (reports every 30s)", flush=True)
+        print(f"Heartbeat monitor started (reports every 30s)", flush=True)
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.workers) as executor:
             # map returns an iterator in order, but we can't show progress easily with map
@@ -322,19 +342,31 @@ class StrategyOptimizer:
                 # Save & Cache Results
                 rows = []
                 for res in results:
+                    if not res or not isinstance(res, dict):
+                        continue
+                        
                     c = res.get("config", {})
-                    pnl_pct = res['net_pnl'] * 100
-                    dd_pct = res['max_drawdown_pct'] * 100
+                    if not c:
+                        continue
+                        
+                    pnl_pct = res.get('net_pnl', 0) * 100
+                    dd_pct = res.get('max_drawdown_pct', 0) * 100
                     
                     self.results_cache.append({
-                        "Pair": res['trading_pair'],
+                        "Pair": res.get('trading_pair', 'Unknown'),
                         "Config": f"Fast {c.get('fast_ma')}/Slow {c.get('slow_ma')}/{c.get('indicator_interval')} (SL {c.get('stop_loss')}/TP {c.get('take_profit')})",
+                        "Interval": c.get('indicator_interval'),
+                        "Fast": c.get('fast_ma'),
+                        "Slow": c.get('slow_ma'),
+                        "SL": c.get('stop_loss'),
+                        "TP": c.get('take_profit'),
                         "PnL": pnl_pct,
                         "Drawdown": dd_pct,
-                        "Sharpe": res['sharpe_ratio'],
+                        "Sharpe": res.get('sharpe_ratio', 0),
+                        "Accuracy": res.get('accuracy', 0),
                     })
                     
-                    row = f"{res['trading_pair']},{c.get('indicator_interval')},{c.get('fast_ma')},{c.get('slow_ma')},{c.get('stop_loss')},{c.get('take_profit')},{c.get('time_limit')},{pnl_pct:.2f},{dd_pct:.2f},{res['accuracy']*100:.2f},{res['sharpe_ratio']:.2f}"
+                    row = f"{res.get('trading_pair')},{c.get('indicator_interval')},{c.get('fast_ma')},{c.get('slow_ma')},{c.get('stop_loss')},{c.get('take_profit')},{c.get('time_limit')},{pnl_pct:.2f},{dd_pct:.2f},{res.get('accuracy', 0)*100:.2f},{res.get('sharpe_ratio', 0):.2f}"
                     rows.append(row)
                 
                 if rows:
@@ -359,7 +391,7 @@ class StrategyOptimizer:
                             best_roi = pnl
                             best_pair = res.get("trading_pair", "N/A")
                             
-                    print(f"\n   ✅ Batch {completed_batches}/{len(batches)} Done: {len(results)} sims. Best: {best_pair} (PnL {best_roi:.2f})")
+                    print(f"\n   Batch {completed_batches}/{len(batches)} Done: {len(results)} sims. Best: {best_pair} (PnL {best_roi:.2f})")
                 
                 pct = completed_batches / len(batches) * 100
                 bar_len = 30
@@ -367,8 +399,8 @@ class StrategyOptimizer:
                 bar = '█' * filled + '-' * (bar_len - filled)
                 
                 # Show progress with ETA
-                print(f"\n🚀 Progress: [{bar}] {pct:.1f}% ({completed_batches}/{len(batches)}) | ETA: {eta_min}m {eta_sec}s", flush=True)
-                print(f"⏱️  Elapsed: {int(elapsed_total//60)}m {int(elapsed_total%60)}s | Avg: {avg_batch_time:.1f}s/batch", flush=True)
+                print(f"\nProgress: [{bar}] {pct:.1f}% ({completed_batches}/{len(batches)}) | ETA: {eta_min}m {eta_sec}s", flush=True)
+                print(f"Elapsed: {int(elapsed_total//60)}m {int(elapsed_total%60)}s | Avg: {avg_batch_time:.1f}s/batch", flush=True)
 
                 # Periodic Memory Cleanup (Every 1 batches)
                 if completed_batches % 1 == 0:
@@ -376,9 +408,9 @@ class StrategyOptimizer:
         
         # Stop heartbeat monitor
         self._heartbeat_running = False
-        print(f"\n💓 Heartbeat monitor stopped", flush=True)
+        print(f"\nHeartbeat monitor stopped", flush=True)
         
-        print(f"\n✅ Optimization Complete.")
+        print(f"\nOptimization Complete.")
         self.generate_report(self.results_cache)
 
     def clean_server_memory(self):
@@ -389,7 +421,7 @@ class StrategyOptimizer:
 
     def generate_report(self, results):
         if not results:
-            print("❌ No results to report.")
+            print("No results to report.")
             return
 
         df = pd.DataFrame(results)
@@ -403,31 +435,50 @@ class StrategyOptimizer:
         md_filename = f"{OUTPUT_DIR}/report_{self.mode}_{self.report_id}.md"
         
         with open(md_filename, 'w') as f:
-            f.write(f"# 📊 Strategy Optimization Report: {self.mode.title()}\n\n")
+            f.write(f"# Strategy Optimization Report: {self.mode.title()}\n\n")
             f.write(f"**Date**: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n")
             f.write(f"**Analysis Window**: Last {self.days} days\n")
             f.write(f"**Resolution**: 1m (High Precision)\n\n")
             
-            f.write("## 🏆 Top Performers (Holy Grails)\n")
+            f.write("## Top Performers (Holy Grails)\n")
             f.write("> **Criteria**: PnL > 15% , Max Drawdown < 20%\n\n")
             if not grails.empty:
-                f.write(grails.head(10)[["Pair", "Config", "PnL", "Drawdown", "Sharpe"]].to_markdown(index=False, floatfmt=".2f"))
+                try:
+                    f.write(grails.head(10)[["Pair", "Config", "PnL", "Drawdown", "Sharpe"]].to_markdown(index=False, floatfmt=".2f"))
+                except ImportError:
+                    # Fallback if tabulate not installed
+                    f.write("```\n")
+                    f.write(grails.head(10)[["Pair", "Config", "PnL", "Drawdown", "Sharpe"]].to_string(index=False))
+                    f.write("\n```")
             else:
                 f.write("*No strategies met the strict 'Holy Grail' criteria in this run.*")
             
-            f.write("\n\n## 💎 Low Risk Gems (High Stability)\n")
-            f.write("> **Criteria**: PnL > 0%, Max Drawdown < 10%, Sharpe > 1.5\n\n")
-            if not gems.empty:
-                f.write(gems.head(10)[["Pair", "Config", "PnL", "Drawdown", "Sharpe"]].to_markdown(index=False, floatfmt=".2f"))
+            f.write("\n\n## Sweet Spot Analysis (Robust Parameter Clusters)\n")
+            f.write("> **Why this matters**: Individual peaks are often overfitting. We look for 'Sweet Spots'—ranges of parameters that perform consistently well across multiple tests.\n\n")
+            
+            # Analyze MA Sweet Spots
+            ma_analysis = df.groupby(["Pair", "Interval", "Fast", "Slow"])["PnL"].agg(["mean", "count", "std"]).reset_index()
+            # Filter for clusters (at least 2 identical configs or very similar ones)
+            # Since discovery is random, we bucket MAs
+            df_bucketed = df.copy()
+            df_bucketed["Fast_Bucket"] = (df_bucketed["Fast"] // 5) * 5
+            df_bucketed["Slow_Bucket"] = (df_bucketed["Slow"] // 20) * 20
+            
+            cluster = df_bucketed.groupby(["Pair", "Interval", "Fast_Bucket", "Slow_Bucket"])["PnL"].agg(["mean", "count"]).reset_index()
+            cluster = cluster[cluster["count"] >= 2].sort_values("mean", ascending=False).head(10)
+            
+            if not cluster.empty:
+                f.write("### Top MA Range Clusters\n")
+                f.write(cluster.to_markdown(index=False, floatfmt=".2f"))
             else:
-                f.write("*No ultra-stable strategies found.*")
-                
-            f.write("\n\n## 📋 Parameter Instructions\n")
+                f.write("*Not enough overlapping data for cluster analysis. Run more iterations.*")
+
+            f.write("\n\n## Parameter Instructions\n")
             f.write("Apply these best params in **Dashboard -> Smart Strategy**.\n")
             
-        print(f"📝 Report generated: {md_filename}")
+        print(f"Report generated: {md_filename}")
         if not grails.empty:
-            print("\n🏆 Top Result Preview:")
+            print("\nTop Result Preview:")
             print(grails.head(3).to_string(index=False))
 
 if __name__ == "__main__":
@@ -438,9 +489,10 @@ if __name__ == "__main__":
     parser.add_argument("--tokens", type=str, default="ALL")
     parser.add_argument("--batch_size", type=int, default=None, help="Backtest scenarios per API call")
     parser.add_argument("--workers", type=int, default=None, help="Parallel API connections")
+    parser.add_argument("--turbo", action="store_true", help="Use high-performance turbo endpoint (48-core optimized)")
     
     args = parser.parse_args()
     tokens = TOP_10_TOKENS if args.tokens == "ALL" else args.tokens.split(",")
     
-    optimizer = StrategyOptimizer(mode=args.mode, days=args.days, iterations=args.iter, batch_size=args.batch_size, workers=args.workers)
+    optimizer = StrategyOptimizer(mode=args.mode, days=args.days, iterations=args.iter, batch_size=args.batch_size, workers=args.workers, turbo=args.turbo)
     optimizer.run(target_tokens=tokens)
