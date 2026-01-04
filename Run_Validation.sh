@@ -1,12 +1,10 @@
 #!/bin/bash
 # ==============================================
-#  🛡️ Strategy Validation Launcher v2.0
+#  🛡️ Strategy Validation Launcher v2.1
 # ==============================================
-# Validates ALL discovered strategies from report
-# against overfitting using three tests:
-# 1. Out-of-Sample Test (2021-2022 vs 2023-2024)
-# 2. Parameter Sensitivity Analysis
-# 3. Walk-Forward Analysis (6-year, 12-fold)
+# Validates strategies from the LATEST report:
+#   report_discovery_20260103_1354.md
+# Tests: OOS, Sensitivity, Walk-Forward, Monte Carlo
 # ==============================================
 
 set -e
@@ -14,54 +12,47 @@ cd "$(dirname "$0")"
 
 echo ""
 echo "========================================================"
-echo "   🛡️ Strategy Validation Tool v2.0"
+echo "   🛡️ Strategy Validation Tool v2.1"
 echo "========================================================"
-echo "Validating ALL strategies from report_discovery_20260102_1154.md"
+echo "Validating strategies from report_discovery_20260103_1354.md"
 echo "========================================================"
 echo ""
 
-# ALL strategies from the latest discovery report
+# TOP STRATEGIES from latest discovery (100K sims, 360 days)
 # Format: PAIR:FAST:SLOW:INTERVAL:SL:TP:ORIGINAL_PNL
 
-# Holy Grails (11 strategies)
+# Holy Grails - Top 10 (PnL > 60%, DD < 20%)
 HOLY_GRAILS=(
-    "ADA-USDT:55:70:1h:0.04:0.1:71.85"
-    "XRP-USDT:50:70:1h:0.04:0.2:71.04"
-    "XRP-USDT:45:70:1h:0.05:0.08:70.56"
-    "AVAX-USDT:55:70:1h:0.02:0.2:68.83"
-    "AVAX-USDT:45:60:1h:0.02:0.15:66.94"
-    "LINK-USDT:5:160:1h:0.04:0.2:63.88"
-    "ADA-USDT:50:70:1h:0.02:0.08:61.56"
-    "XRP-USDT:45:70:1h:0.02:0.2:58.90"
-    "LINK-USDT:5:160:1h:0.1:0.2:57.89"
-    "AVAX-USDT:55:110:1h:0.05:0.05:57.72"
-    "ADA-USDT:45:70:1h:0.07:0.15:70.35"
+    "ADA-USDT:15:30:1h:0.02:0.15:79.34"
+    "ADA-USDT:15:30:1h:0.02:0.02:77.08"
+    "ADA-USDT:15:30:1h:0.02:0.05:72.15"
+    "ADA-USDT:15:30:1h:0.1:0.15:65.17"
+    "ADA-USDT:15:30:1h:0.04:0.02:64.46"
+    "ADA-USDT:15:30:1h:0.1:0.2:63.56"
+    "ADA-USDT:15:30:1h:0.04:0.2:60.58"
 )
 
-# Low Risk Gems (10 strategies)
-LOW_RISK=(
-    "ADA-USDT:35:180:4h:0.1:0.15:18.74"
-    "ADA-USDT:35:180:4h:0.1:0.1:18.74"
-    "DOGE-USDT:10:120:4h:0.05:0.15:14.83"
-    "BNB-USDT:40:140:4h:0.01:0.02:15.03"
-    "AVAX-USDT:20:190:4h:0.1:0.1:12.02"
-    "ADA-USDT:40:120:4h:0.1:0.02:26.41"
-    "DOGE-USDT:40:60:4h:0.07:0.2:31.70"
-    "ADA-USDT:40:120:4h:0.07:0.15:20.79"
-    "ADA-USDT:40:120:4h:0.1:0.2:20.79"
-    "DOGE-USDT:20:130:4h:0.01:0.1:10.24"
+# Sweet Spot Clusters (Robust multi-count strategies)
+SWEET_SPOTS=(
+    "ADA-USDT:15:20:1h:0.03:0.10:56.69"
+    "SOL-USDT:15:20:1h:0.03:0.10:42.19"
+    "SOL-USDT:20:60:1h:0.04:0.15:40.84"
+    "SOL-USDT:10:20:1h:0.03:0.10:38.71"
+    "LINK-USDT:10:20:1h:0.03:0.10:34.21"
+    "LINK-USDT:55:100:1h:0.05:0.15:32.62"
+    "DOGE-USDT:10:140:1h:0.04:0.10:32.23"
 )
 
 echo "📋 Strategy counts:"
 echo "   - Holy Grails: ${#HOLY_GRAILS[@]}"
-echo "   - Low Risk Gems: ${#LOW_RISK[@]}"
+echo "   - Sweet Spots: ${#SWEET_SPOTS[@]}"
 echo ""
 
 echo "Select which strategies to validate:"
 echo ""
-echo "1. All Holy Grails (11 high PnL strategies)"
-echo "2. All Low Risk Gems (10 stable strategies)"
-echo "3. ALL strategies (21 total)"
+echo "1. Holy Grails only (7 top PnL strategies)"
+echo "2. Sweet Spots only (7 robust cluster strategies)"
+echo "3. ALL strategies (14 total)"
 echo "4. Custom selection"
 echo ""
 read -p "Select Option [1/2/3/4]: " OPTION
@@ -69,16 +60,16 @@ read -p "Select Option [1/2/3/4]: " OPTION
 case $OPTION in
     1)
         STRATEGIES=$(IFS=,; echo "${HOLY_GRAILS[*]}")
-        echo "📌 Validating 11 Holy Grail strategies..."
+        echo "📌 Validating 7 Holy Grail strategies..."
         ;;
     2)
-        STRATEGIES=$(IFS=,; echo "${LOW_RISK[*]}")
-        echo "📌 Validating 10 Low Risk Gem strategies..."
+        STRATEGIES=$(IFS=,; echo "${SWEET_SPOTS[*]}")
+        echo "📌 Validating 7 Sweet Spot strategies..."
         ;;
     3)
-        ALL=("${HOLY_GRAILS[@]}" "${LOW_RISK[@]}")
+        ALL=("${HOLY_GRAILS[@]}" "${SWEET_SPOTS[@]}")
         STRATEGIES=$(IFS=,; echo "${ALL[*]}")
-        echo "📌 Validating ALL 21 strategies..."
+        echo "📌 Validating ALL 14 strategies..."
         ;;
     4)
         echo ""
@@ -88,20 +79,22 @@ case $OPTION in
         ;;
     *)
         STRATEGIES=$(IFS=,; echo "${HOLY_GRAILS[*]}")
-        echo "📌 Default: Validating 11 Holy Grail strategies..."
+        echo "📌 Default: Validating 7 Holy Grail strategies..."
         ;;
 esac
 
 echo ""
 echo "🚀 Starting validation..."
-echo "⏱️  This may take 30-60 minutes for large sets."
-echo "   Status will be updated as each strategy completes."
+echo "⏱️  Estimated time: 5-15 minutes (Turbo Mode enabled)"
 echo ""
 
-# Run validator inside Docker container
-docker exec -it hummingbot-api python /hummingbot-api/bots/controllers/custom/StrategyValidator.py \
+# Run validator inside Dashboard container (where Python + packages exist)
+# Use HOST_PATH for clickable report links
+docker exec -e HOST_PATH="$(pwd)" -t dashboard \
+    /opt/conda/envs/dashboard/bin/python3 \
+    /home/dashboard/custom_strategies/StrategyValidator.py \
     --strategies "$STRATEGIES" \
-    --days 730
+    --days 360
 
 echo ""
 echo "✅ Validation complete!"

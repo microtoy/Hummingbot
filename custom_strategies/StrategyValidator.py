@@ -30,10 +30,11 @@ from requests.auth import HTTPBasicAuth
 
 # --- CONFIGURATION ---
 API_HOST = os.getenv("API_HOST", os.getenv("BACKEND_API_HOST", "localhost"))
-API_URL = f"http://{API_HOST}:8000/backtesting/batch-run"
+API_URL = f"http://{API_HOST}:8000/backtesting/batch-run-turbo"
 GC_URL = f"http://{API_HOST}:8000/backtesting/gc"
 AUTH = HTTPBasicAuth("admin", "admin")
-OUTPUT_DIR = "/hummingbot-api/bots/controllers/custom/validation_reports"
+OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "validation_reports")
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # Parallel execution settings (Optimized for 10-core CPU)
 # Backend uses ProcessPoolExecutor(max_workers=10)
@@ -162,7 +163,10 @@ class StrategyValidator:
                 "take_profit": tp,
                 "time_limit": 21600,              # Align with Optimizer (6 hours)
                 "total_amount_quote": 100,        # Align with Optimizer
-                "use_compounding": True           # Align with Optimizer
+                "use_compounding": True,          # Align with Optimizer
+                "leverage": 1,                    # Spot-like behavior
+                "max_executors_per_side": 2,      # Consistent with discovery
+                "cooldown_time": 300              # Consistent with discovery
             },
             "start_time": start,
             "end_time": end,
@@ -198,9 +202,14 @@ class StrategyValidator:
                 timeout=600
             )
             if response.status_code == 200:
-                return response.json().get("results", [])
-            return [{"error": "API Error", "net_pnl": 0}] * len(configs)
+                results = response.json().get("results", [])
+                if not results:
+                    print(f" ⚠️ [API WARNING] Batch returned empty results list")
+                return results
+            print(f" ⚠️ [API ERROR] {response.status_code}: {response.text[:200]}")
+            return [{"error": f"API {response.status_code}", "net_pnl": 0}] * len(configs)
         except Exception as e:
+            print(f" ⚠️ [BATCH ERROR] {str(e)}")
             return [{"error": str(e), "net_pnl": 0}] * len(configs)
     
     def _run_parallel_batches(self, all_configs: list) -> list:
@@ -298,7 +307,8 @@ class StrategyValidator:
         """
         print(f"   🔬 Running Sensitivity Test for {strategy['pair']}...", end="", flush=True)
         
-        start, end = self._get_time_range(self.days)
+        # Use same time window as optimization (offset by 365 days to match discovery)
+        start, end = self._get_time_range(self.days, offset_days=365)
         
         # Generate parameter variations
         fast_base = strategy['fast_ma']
@@ -325,7 +335,12 @@ class StrategyValidator:
         pnls = [float(r.get("net_pnl", 0)) * 100 for r in results if "error" not in r]
         
         if len(pnls) < 5:
-            print(f" ⚠️ INSUFFICIENT DATA ({len(pnls)} valid results)")
+            if results and len(results) > 0:
+                first_result = results[0]
+                error_msg = first_result.get("error", "No error key") if isinstance(first_result, dict) else str(first_result)
+            else:
+                error_msg = f"Empty results (sent {len(configs)} configs)"
+            print(f" ⚠️ INSUFFICIENT DATA ({len(pnls)} valid/{len(results)} returned). Error: {str(error_msg)[:200]}")
             return {"test": "Sensitivity", "passed": False, "reason": "insufficient_data"}
         
         mean_pnl = np.mean(pnls)
@@ -465,7 +480,7 @@ class StrategyValidator:
         print(f"   🎲 Running Monte Carlo Test for {strategy['pair']}...", end="", flush=True)
         
         # First, run a single backtest to get trade-level results
-        start, end = self._get_time_range(self.days)
+        start, end = self._get_time_range(self.days, offset_days=365)
         config = self._build_config(
             strategy['pair'], strategy['fast_ma'], strategy['slow_ma'],
             strategy['interval'], strategy['stop_loss'], strategy['take_profit'],
@@ -547,7 +562,7 @@ class StrategyValidator:
         """
         print(f"   📊 Running Stability Test for {strategy['pair']}...", end="", flush=True)
         
-        start, end = self._get_time_range(self.days)
+        start, end = self._get_time_range(self.days, offset_days=365)
         
         # Center config (original params)
         center_config = self._build_config(

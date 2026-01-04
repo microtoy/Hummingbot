@@ -919,12 +919,19 @@ def _run_turbo_batch_internal(configs_chunk: list, start: int, end: int, resolut
                     controllers_module=_WORKER_SETTINGS.app.controllers_module
                 )
                 
+                # ⚡ FIX: Use individual time windows from each config_data
+                # Fallback to shared (start, end) for backward compatibility
+                cfg_start = config_data.get("start_time", start) if isinstance(config_data, dict) else start
+                cfg_end = config_data.get("end_time", end) if isinstance(config_data, dict) else end
+                cfg_resolution = config_data.get("backtesting_resolution", resolution) if isinstance(config_data, dict) else resolution
+                cfg_trade_cost = config_data.get("trade_cost", trade_cost) if isinstance(config_data, dict) else trade_cost
+                
                 bt_result = await _LOCAL_ENGINE.run_backtesting(
                     controller_config=controller_config,
-                    trade_cost=trade_cost,
-                    start=start,
-                    end=end,
-                    backtesting_resolution=resolution
+                    trade_cost=cfg_trade_cost,
+                    start=int(cfg_start),
+                    end=int(cfg_end),
+                    backtesting_resolution=cfg_resolution
                 )
                 
                 if bt_result is None:
@@ -939,6 +946,7 @@ def _run_turbo_batch_internal(configs_chunk: list, start: int, end: int, resolut
                 results.append({
                     "trading_pair": controller_config.trading_pair,
                     "config": inner_cfg,
+                    # Core metrics
                     "net_pnl": float(summary.get("net_pnl", 0)),
                     "net_pnl_quote": float(summary.get("net_pnl_quote", 0)),
                     "accuracy": float(summary.get("accuracy", 0)),
@@ -946,6 +954,16 @@ def _run_turbo_batch_internal(configs_chunk: list, start: int, end: int, resolut
                     "max_drawdown_pct": float(summary.get("max_drawdown_pct", 0)),
                     "profit_factor": float(summary.get("profit_factor", 0)),
                     "total_positions": int(summary.get("total_positions", 0)),
+                    # Extended metrics (already computed, zero overhead)
+                    "close_types": summary.get("close_types", {}),  # Exit type distribution (TP/SL/TIME_LIMIT)
+                    "accuracy_long": float(summary.get("accuracy_long", 0)),
+                    "accuracy_short": float(summary.get("accuracy_short", 0)),
+                    "total_long": int(summary.get("total_long", 0)),
+                    "total_short": int(summary.get("total_short", 0)),
+                    "win_signals": int(summary.get("win_signals", 0)),
+                    "loss_signals": int(summary.get("loss_signals", 0)),
+                    "total_volume": float(summary.get("total_volume", 0)),
+                    "max_drawdown_usd": float(summary.get("max_drawdown_usd", 0)),
                     "performance": bt_result.get("performance", {})
                 })
                 # NOTE: Keep candles_feeds cached for subsequent same-pair simulations
@@ -1001,12 +1019,21 @@ async def batch_run_turbo(batch_configs: list[BacktestingConfig]):
     resolution = first_config.backtesting_resolution
     trade_cost = first_config.trade_cost
     
-    # Extract config dicts
-    config_dicts = [cfg.config for cfg in batch_configs]
+    # ⚡ FIX: Pass FULL config objects (with time windows) not just inner config dicts
+    # Each config can have its own start_time, end_time, resolution, trade_cost
+    config_full_list = []
+    for cfg in batch_configs:
+        config_full_list.append({
+            "config": cfg.config,
+            "start_time": int(cfg.start_time),
+            "end_time": int(cfg.end_time),
+            "backtesting_resolution": cfg.backtesting_resolution,
+            "trade_cost": cfg.trade_cost
+        })
     
     # ⚡ OPTIMAL CHUNKING: Create EXACTLY 48 chunks (one per worker)
     # This ensures all workers start together and finish together
-    num_configs = len(config_dicts)
+    num_configs = len(config_full_list)
     num_workers = min(_GLOBAL_POOL_SIZE, num_configs)  # Don't use more workers than configs
     
     # Balanced split: distribute configs evenly across workers
@@ -1016,7 +1043,7 @@ async def batch_run_turbo(batch_configs: list[BacktestingConfig]):
         start_idx = i * num_configs // num_workers
         end_idx = (i + 1) * num_configs // num_workers
         if start_idx < end_idx:  # Only add non-empty chunks
-            chunks.append(config_dicts[start_idx:end_idx])
+            chunks.append(config_full_list[start_idx:end_idx])
     
     # Dispatch chunks to workers
     tasks = []
