@@ -197,12 +197,67 @@ if "failed_sync_tasks" in st.session_state and st.session_state.failed_sync_task
 # --- 4. Server Cache Management ---
 st.divider()
 st.subheader("📦 Server Cache Management")
+
+def update_all_worker(file_info, base_url, auth):
+    """Worker function to update a single cached file to latest."""
+    try:
+        payload = {
+            "start_time": file_info["end"] + 1,
+            "end_time": int(datetime.now().timestamp()),
+            "backtesting_resolution": file_info["interval"],
+            "trade_cost": 0.0006,
+            "config": {"connector_name": file_info["connector"], "trading_pair": file_info["trading_pair"], "candles_config": []}
+        }
+        url = f"{base_url}/backtesting/candles/sync"
+        response = requests.post(url, json=payload, auth=auth, timeout=600)
+        if response.status_code == 200:
+            result = response.json()
+            if "error" in result:
+                return {"file": file_info["file"], "status": "❌", "msg": str(result["error"])[:20]}
+            return {"file": file_info["file"], "status": "✅", "msg": f"+{result.get('rows', 0)} rows"}
+        return {"file": file_info["file"], "status": "❌", "msg": f"HTTP {response.status_code}"}
+    except Exception as e:
+        return {"file": file_info["file"], "status": "❌", "msg": str(e)[:20]}
+
 try:
     cache_status = backend_api_client.backtesting.get_candles_status()
     cached_files = cache_status.get("cached_files", [])
     if not cached_files: st.info("No data cached yet.")
     else:
         cached_files = sorted(cached_files, key=lambda x: x['trading_pair'])
+        
+        # Update All button
+        update_all_col1, update_all_col2 = st.columns([1, 3])
+        with update_all_col1:
+            update_all_btn = st.button("🔁 Update All to Latest", use_container_width=True, type="primary")
+        with update_all_col2:
+            update_all_progress = st.empty()
+        
+        if update_all_btn:
+            update_all_progress.info(f"⏳ Updating {len(cached_files)} cached files...")
+            progress_bar = st.progress(0, text="Starting...")
+            results = []
+            completed = 0
+            
+            with ThreadPoolExecutor(max_workers=5) as executor:
+                futures = {executor.submit(update_all_worker, f, api_url, api_auth): f["file"] for f in cached_files}
+                for future in as_completed(futures):
+                    result = future.result()
+                    results.append(result)
+                    completed += 1
+                    progress_bar.progress(completed / len(cached_files), text=f"Progress: {completed}/{len(cached_files)}")
+            
+            success_count = sum(1 for r in results if r["status"] == "✅")
+            fail_count = len(results) - success_count
+            if fail_count == 0:
+                st.success(f"✅ All {success_count} files updated successfully!")
+            else:
+                st.warning(f"⚠️ {success_count} succeeded, {fail_count} failed")
+                for r in results:
+                    if r["status"] == "❌":
+                        st.error(f"  - {r['file']}: {r['msg']}")
+            st.rerun()
+        
         headers = st.columns([1.5, 1, 1, 2.5, 1, 1])
         headers[0].write("**Exch**"); headers[1].write("**Pair**"); headers[2].write("**Intv**"); headers[3].write("**Coverage**"); headers[4].write("**Rows**"); headers[5].write("**Action**")
         for f in cached_files:
