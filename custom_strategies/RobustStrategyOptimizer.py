@@ -37,13 +37,14 @@ class RobustStrategyOptimizer:
     Based on methodologies used by quantitative hedge funds.
     """
     
-    def __init__(self, mode="robust", days=365, iterations=100, batch_size=250, workers=4, turbo=True):
+    def __init__(self, mode="robust", days=365, iterations=100, batch_size=250, workers=4, turbo=True, strategy="ma_cross"):
         self.mode = mode
         self.turbo = turbo
         self.days = days
         self.iterations = iterations
         self.batch_size = batch_size
         self.workers = workers
+        self.strategy = strategy  # "ma_cross" or "rsi_reversion"
         self.report_id = datetime.now().strftime("%Y%m%d_%H%M")
         self.results_cache = []
         
@@ -51,18 +52,39 @@ class RobustStrategyOptimizer:
         self.api_url = API_URL_TURBO if turbo else API_URL
         self.gc_url = f"http://{API_HOST}:8000/backtesting/gc"
         
-        # Statistics tracking
         self.stats = {
             "batches_sent": 0,
             "batches_received": 0,
             "sims_completed": 0,
             "sims_error": 0,
+            "total_tasks": 0,
             "best_robust_score": -999.0,
             "best_pair": "N/A",
+            "start_time": time.time(),
         }
         self.stats_lock = threading.Lock()
+        self.stop_event = threading.Event()
         
         os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    def status_reporter(self, interval=300):
+        """Background thread to report status every 5 minutes."""
+        while not self.stop_event.is_set():
+            time.sleep(interval)
+            if self.stop_event.is_set(): break
+            
+            with self.stats_lock:
+                elapsed = time.time() - self.stats["start_time"]
+                completed = self.stats["sims_completed"]
+                total = self.stats["total_tasks"]
+                progress = (completed / total * 100) if total > 0 else 0
+                throughput = (completed / elapsed * 60) if elapsed > 0 else 0
+                
+                print(f"\n📢 [STATUS] {datetime.now().strftime('%H:%M:%S')}")
+                print(f"   Progress: {progress:.1f}% ({completed}/{total})")
+                print(f"   Throughput: {throughput:.1f} sims/min")
+                print(f"   Errors: {self.stats['sims_error']}")
+                print(f"   Best Score: {self.stats['best_robust_score']:.2f} ({self.stats['best_pair']})\n")
     
     # =========================================================================
     # TIME WINDOW GENERATORS
@@ -78,7 +100,7 @@ class RobustStrategyOptimizer:
         Example with periods=4, period_days=365:
         Period 1: offset 365-730 days ago   (roughly Y-1)
         Period 2: offset 730-1095 days ago  (roughly Y-2)
-        Period 3: offset 1095-1460 days ago (roughly Y-3)
+        Period 3: offset 1095-1460 days ago (roughly Y-3)f v
         Period 4: offset 1460-1825 days ago (roughly Y-4)
         """
         now = datetime.now()
@@ -131,13 +153,15 @@ class RobustStrategyOptimizer:
                 break
             
             windows.append({
+                "period": step + 1,
                 "step": step + 1,
                 "train_start_ts": int(anchor_date.timestamp()),
                 "train_end_ts": int(train_end.timestamp()),
                 "test_start_ts": int(test_start.timestamp()),
                 "test_end_ts": int(test_end.timestamp()),
                 "train_label": f"{anchor_date.strftime('%Y-%m')} to {train_end.strftime('%Y-%m')}",
-                "test_label": f"{test_start.strftime('%Y-%m')} to {test_end.strftime('%Y-%m')}"
+                "test_label": f"{test_start.strftime('%Y-%m')} to {test_end.strftime('%Y-%m')}",
+                "description": f"OOS {test_start.strftime('%Y-%m')} to {test_end.strftime('%Y-%m')}"
             })
             
             # Expand training window by 6 months
@@ -150,18 +174,17 @@ class RobustStrategyOptimizer:
     # ROBUSTNESS SCORING
     # =========================================================================
     
-    def calculate_wfe(self, in_sample_pnl, out_of_sample_pnl):
+    def calculate_wfe(self, is_pnl, oos_pnl):
         """
-        Walk-Forward Efficiency: OOS performance / IS performance
-        
-        WFE > 0.5: Good (strategy generalizes well)
-        WFE < 0.3: Poor (likely overfitting)
+        Walk-Forward Efficiency: OOS performance / Annualized IS performance
+        WFE > 0.5: Good stability
         """
-        if in_sample_pnl <= 0:
-            return 0.0
-        return min(1.0, out_of_sample_pnl / in_sample_pnl) if in_sample_pnl > 0 else 0.0
-    
-    def calculate_robust_score(self, period_results: dict):
+        if is_pnl <= 0: return 0.0
+        # Simple ratio: How much of the 'promise' did it deliver in OOS?
+        eff = oos_pnl / is_pnl if is_pnl > 0 else 0
+        return max(0, min(1.2, eff))
+
+    def calculate_robust_score(self, period_results: dict, mode="robust"):
         """
         Calculate robustness score based on multi-period performance.
         
@@ -190,20 +213,24 @@ class RobustStrategyOptimizer:
         max_pnl = np.max(pnls)
         total_trades = sum(trades)
         
-        # Filter: Must be profitable in at least 75% of periods
-        consistency_ratio = profitable_periods / n_periods
-        if consistency_ratio < 0.75:
-            return 0, False, {"reason": f"Only {profitable_periods}/{n_periods} periods profitable"}
+        # AWFO Specific Logic: Average WFE
+        wfe_scores = [pr.get("wfe", 0) for pr in period_results.values() if "wfe" in pr]
+        avg_wfe = np.mean(wfe_scores) if wfe_scores else 1.0
         
+        # Consistency Filter
+        consistency_ratio = profitable_periods / n_periods
+
         # Stability penalty (lower variance = better)
         if abs(mean_pnl) > 0.001:
             cv = std_pnl / abs(mean_pnl)  # Coefficient of variation
             stability = max(0, 1 - cv)
         else:
             stability = 0
-        
-        # Final score: Mean * Consistency * Stability
+
+        # Final score: Mean * Consistency * Stability * WFE
         score = mean_pnl * np.sqrt(consistency_ratio) * (0.5 + 0.5 * stability)
+        if mode == "awfo":
+            score *= (0.2 + 0.8 * avg_wfe)
         
         # Aggregate stats
         stats = {
@@ -218,10 +245,16 @@ class RobustStrategyOptimizer:
             "max_drawdown": np.max(np.abs(max_dds)) if max_dds else 0,
             "profitable_periods": profitable_periods,
             "consistency": consistency_ratio,
-            "stability": stability
+            "stability": stability,
+            "avg_wfe": avg_wfe
         }
         
-        return score, True, stats
+        # Check robustness criteria
+        is_valid = consistency_ratio >= 0.50
+        if not is_valid:
+            stats["reason"] = f"Only {profitable_periods}/{n_periods} periods profitable"
+
+        return score if is_valid else 0, is_valid, stats
     
     def check_parameter_robustness(self, base_results, neighbor_results):
         """
@@ -244,7 +277,7 @@ class RobustStrategyOptimizer:
     # =========================================================================
     
     def _build_config(self, pair, fast, slow, interval, sl, tp):
-        """Build a standard backtest configuration."""
+        """Build a standard MA Cross backtest configuration."""
         return {
             "connector_name": "binance",
             "controller_name": "ma_cross_strategy",
@@ -261,6 +294,59 @@ class RobustStrategyOptimizer:
             "leverage": 1,
             "max_executors_per_side": 2,
             "cooldown_time": 300
+        }
+    
+    def _build_rsi_config(self, pair, rsi_period, rsi_oversold, rsi_overbought, bb_period, bb_std, use_trend_filter, trend_ma_period, interval, sl, tp):
+        # Scale time_limit with interval (e.g., 24 bars)
+        limit_seconds = 86400 if interval == "1h" else 345600  # 24h or 96h
+        
+        return {
+            "connector_name": "binance",
+            "controller_name": "rsi_reversion_strategy",
+            "controller_type": "custom",
+            "trading_pair": pair,
+            "rsi_period": rsi_period,
+            "rsi_oversold": rsi_oversold,
+            "rsi_overbought": rsi_overbought,
+            "bb_period": bb_period,
+            "bb_std": bb_std,
+            "use_trend_filter": use_trend_filter,
+            "trend_ma_period": trend_ma_period,
+            "indicator_interval": interval,
+            "stop_loss": sl,
+            "take_profit": tp,
+            "time_limit": limit_seconds,
+            "total_amount_quote": 100,
+            "use_compounding": True,
+            "leverage": 1,
+            "max_executors_per_side": 2,
+            "cooldown_time": 300,
+            "candles_config": []
+        }
+    
+    def _build_grid_config(self, pair, bb_period, bb_std, entry_threshold, use_trend_filter, trend_ma_period, interval, sl, tp):
+        """Build BB Grid strategy configuration."""
+        limit_seconds = 86400 if interval == "1h" else 345600
+        return {
+            "connector_name": "binance",
+            "controller_name": "bb_grid_strategy",
+            "controller_type": "custom",
+            "trading_pair": pair,
+            "bb_period": bb_period,
+            "bb_std": bb_std,
+            "entry_threshold": entry_threshold,
+            "use_trend_filter": use_trend_filter,
+            "trend_ma_period": trend_ma_period,
+            "indicator_interval": interval,
+            "stop_loss": sl,
+            "take_profit": tp,
+            "time_limit": limit_seconds,
+            "total_amount_quote": 100,
+            "use_compounding": True,
+            "leverage": 1,
+            "max_executors_per_side": 2,
+            "cooldown_time": 300,
+            "candles_config": []
         }
     
     def _run_batch(self, configs):
@@ -280,8 +366,16 @@ class RobustStrategyOptimizer:
             
             with self.stats_lock:
                 self.stats["batches_received"] += 1
-                self.stats["sims_completed"] += sum(1 for r in results if "error" not in r)
-                self.stats["sims_error"] += sum(1 for r in results if "error" in r)
+                completed = sum(1 for r in results if "error" not in r)
+                errors = sum(1 for r in results if "error" in r)
+                self.stats["sims_completed"] += completed
+                self.stats["sims_error"] += errors
+                
+                if errors > 0 and self.stats["sims_error"] < 1000: # Only print first few errors to avoid log spam
+                    for r in results:
+                        if "error" in r:
+                            print(f"\n❌ API Error Sample: {r['error'][:500]}...")
+                            break
             
             return results
         except Exception as e:
@@ -335,6 +429,29 @@ class RobustStrategyOptimizer:
     
     def generate_random_config(self, pair):
         """Generate a random parameter configuration for discovery."""
+        if self.strategy == "rsi_reversion":
+            return self._generate_rsi_config(pair)
+        elif self.strategy == "bb_grid":
+            return self._generate_grid_config(pair)
+        else:
+            return self._generate_ma_cross_config(pair)
+
+    def _generate_grid_config(self, pair):
+        """Generate random BB Grid configuration."""
+        interval = random.choice(["1h", "4h"])
+        # Relaxed settings to ensure more trades
+        bb_period = random.choice([20, 30, 50, 100])
+        bb_std = random.choice([1.0, 1.5, 2.0, 2.5])
+        entry_threshold = random.choice([0.3, 0.5, 0.7, 0.9])
+        use_trend_filter = random.choice([True, False, False]) # Prefer False
+        trend_ma_period = random.choice([100, 200, 300])
+        sl = random.choice([0.03, 0.05, 0.07])
+        tp = random.choice([0.02, 0.03, 0.05, 0.08]) # Lower TP for grid consistency
+        
+        return self._build_grid_config(pair, bb_period, bb_std, entry_threshold, use_trend_filter, trend_ma_period, interval, sl, tp)
+    
+    def _generate_ma_cross_config(self, pair):
+        """Generate random MA Cross configuration."""
         interval = random.choice(["1h", "4h"])
         fast = random.choice(list(range(5, 60, 5)))
         slow = random.choice([s for s in range(20, 200, 10) if s > fast + 10])
@@ -342,6 +459,21 @@ class RobustStrategyOptimizer:
         tp = random.choice([0.02, 0.05, 0.08, 0.10, 0.15])
         
         return self._build_config(pair, fast, slow, interval, sl, tp)
+    
+    def _generate_rsi_config(self, pair):
+        """Generate random RSI Reversion configuration."""
+        interval = random.choice(["1h", "4h"])
+        rsi_period = random.choice([7, 10, 14, 21])
+        rsi_oversold = random.choice([20, 25, 30, 35])
+        rsi_overbought = random.choice([65, 70, 75, 80])
+        bb_period = random.choice([15, 20, 25])
+        bb_std = random.choice([1.5, 2.0, 2.5])
+        use_trend_filter = random.choice([True, False])
+        trend_ma_period = random.choice([50, 100, 150, 200])
+        sl = random.choice([0.02, 0.03, 0.04, 0.05])
+        tp = random.choice([0.03, 0.05, 0.07, 0.10])
+        
+        return self._build_rsi_config(pair, rsi_period, rsi_oversold, rsi_overbought, bb_period, bb_std, use_trend_filter, trend_ma_period, interval, sl, tp)
     
     # =========================================================================
     # MAIN OPTIMIZATION LOOP
@@ -379,24 +511,44 @@ class RobustStrategyOptimizer:
                 })
         
         # 2. FLATTEN INTO BACKTEST TASKS
-        print(f"📦 Squashing into {len(all_candidates) * periods:,d} backtest tasks...")
         all_tasks = []
-        windows = self.get_multi_year_windows(periods=periods)
-        
-        for cand_idx, cand in enumerate(all_candidates):
-            for window in windows:
-                all_tasks.append({
-                    "cand_idx": cand_idx,
-                    "period": window["period"],
-                    "start_time": window["start_ts"],
-                    "end_time": window["end_ts"],
-                    "config": cand["config"],
-                    "backtesting_resolution": "1m",
-                    "trade_cost": 0.0006
-                })
+        if self.mode == "awfo":
+            windows = self.get_anchored_wfo_windows(anchor_year=2021)
+            print(f"📦 Squashing into {len(all_candidates) * len(windows) * 2:,d} tasks (AWFO: IS+OOS)...")
+            for cand_idx, cand in enumerate(all_candidates):
+                for win in windows:
+                    # In-Sample Task
+                    all_tasks.append({
+                        "cand_idx": cand_idx, "step": win["step"], "type": "is",
+                        "start_time": win["train_start_ts"], "end_time": win["train_end_ts"],
+                        "config": cand["config"], "backtesting_resolution": "1m", "trade_cost": 0.0006
+                    })
+                    # Out-of-Sample Task
+                    all_tasks.append({
+                        "cand_idx": cand_idx, "step": win["step"], "type": "oos",
+                        "start_time": win["test_start_ts"], "end_time": win["test_end_ts"],
+                        "config": cand["config"], "backtesting_resolution": "1m", "trade_cost": 0.0006
+                    })
+        else:
+            windows = self.get_multi_year_windows(periods=periods)
+            print(f"📦 Squashing into {len(all_candidates) * periods:,d} backtest tasks...")
+            for cand_idx, cand in enumerate(all_candidates):
+                for window in windows:
+                    all_tasks.append({
+                        "cand_idx": cand_idx, "period": window["period"], "type": "normal",
+                        "start_time": window["start_ts"], "end_time": window["end_ts"],
+                        "config": cand["config"], "backtesting_resolution": "1m", "trade_cost": 0.0006
+                    })
         
         # 3. PROCESS IN PARALLEL BATCHES
         print(f"⚡ Dispatched to {self.workers} workers. Processing...")
+        self.stats["total_tasks"] = len(all_tasks)
+        self.stats["start_time"] = time.time()
+        
+        # Start background status reporter
+        reporter_thread = threading.Thread(target=self.status_reporter, args=(300,))
+        reporter_thread.daemon = True
+        reporter_thread.start()
         
         # Divide all_tasks into chunks for Turbo API
         task_chunks = [all_tasks[i:i + self.batch_size] for i in range(0, len(all_tasks), self.batch_size)]
@@ -426,41 +578,65 @@ class RobustStrategyOptimizer:
                     eta = (elapsed / processed_batches) * (total_batches - processed_batches)
                     print(f"   Progress: {progress_pct:.1f}% | Batches: {processed_batches}/{total_batches} | ETA: {int(eta//60)}m", flush=True)
 
+        # Stop reporter
+        self.stop_event.set()
+
         # 4. RECONSTRUCT CANDIDATE RESULTS
         print(f"\n🧩 Reconstructing results and scoring...")
         candidate_results = [{} for _ in range(len(all_candidates))]
         
         for i, task in enumerate(all_tasks):
             cand_idx = task["cand_idx"]
-            period = task["period"]
             res = raw_results[i]
             
-            if res and "error" not in res:
-                candidate_results[cand_idx][period] = {
-                    "pnl": float(res.get("net_pnl", 0)) * 100,
-                    "trades": int(res.get("total_positions", 0)),
-                    "accuracy": float(res.get("accuracy", 0)) * 100,
-                    "sharpe": float(res.get("sharpe_ratio", 0) or 0),
-                    "max_dd": float(res.get("max_drawdown_pct", 0)) * 100,
-                    "profit_factor": float(res.get("profit_factor", 0)),
-                }
+            if not res or "error" in res: continue
+            
+            p_data = {
+                "pnl": float(res.get("net_pnl", 0)) * 100,
+                "trades": int(res.get("total_positions", 0)),
+                "accuracy": float(res.get("accuracy", 0)) * 100,
+                "sharpe": float(res.get("sharpe_ratio", 0) or 0),
+                "max_dd": float(res.get("max_drawdown_pct", 0)) * 100,
+                "profit_factor": float(res.get("profit_factor", 0)),
+            }
+            
+            if self.mode == "awfo":
+                step = task["step"]
+                if step not in candidate_results[cand_idx]: candidate_results[cand_idx][step] = {"is": {}, "oos": {}}
+                candidate_results[cand_idx][step][task["type"]] = p_data
             else:
-                candidate_results[cand_idx][period] = {
-                    "pnl": 0.0, "trades": 0, "accuracy": 0.0,
-                    "sharpe": 0.0, "max_dd": 0.0, "profit_factor": 0.0
-                }
+                candidate_results[cand_idx][task["period"]] = p_data
+
+        # 4.5 AWFO POST-PROCESSING: Calculate WFE
+        if self.mode == "awfo":
+            for cand_idx in range(len(all_candidates)):
+                for step, step_data in candidate_results[cand_idx].items():
+                    is_pnl = step_data["is"].get("pnl", 0)
+                    oos_pnl = step_data["oos"].get("pnl", 0)
+                    step_data["pnl"] = oos_pnl # Standardizing for robust scorer to use OOS
+                    step_data["trades"] = step_data["oos"].get("trades", 0)
+                    step_data["accuracy"] = step_data["oos"].get("accuracy", 0)
+                    step_data["sharpe"] = step_data["oos"].get("sharpe", 0)
+                    step_data["max_dd"] = step_data["oos"].get("max_dd", 0)
+                    step_data["wfe"] = self.calculate_wfe(is_pnl, oos_pnl)
 
         # 5. SCORING AND FILTERING
         robust_results = []
         csv_file = f"{OUTPUT_DIR}/robust_{self.report_id}.csv"
         
+        num_periods = len(windows)
         with open(csv_file, 'w') as f:
-            period_headers = ','.join([f"P{i+1}_PnL" for i in range(periods)])
-            f.write(f"Pair,Interval,Fast,Slow,SL,TP,{period_headers},Mean_PnL,Trades,Accuracy,Sharpe,MaxDD,Score,Valid\n")
+            period_headers = ','.join([f"P{i+1}_PnL" for i in range(num_periods)])
+            if self.strategy == "rsi_reversion":
+                f.write(f"Pair,Interval,RSI_Period,RSI_Oversold,RSI_Overbought,BB_Period,Trend_MA,SL,TP,{period_headers},Mean_PnL,Trades,Accuracy,Sharpe,MaxDD,Score,Valid\n")
+            elif self.strategy == "bb_grid":
+                f.write(f"Pair,Interval,BB_Period,BB_Std,Threshold,Trend_MA,SL,TP,{period_headers},Mean_PnL,Trades,Accuracy,Sharpe,MaxDD,Score,Valid\n")
+            else:
+                f.write(f"Pair,Interval,Fast,Slow,SL,TP,{period_headers},Mean_PnL,Trades,Accuracy,Sharpe,MaxDD,Score,Valid\n")
             
             for i, cand in enumerate(all_candidates):
                 period_pnls = candidate_results[i]
-                score, is_valid, stats = self.calculate_robust_score(period_pnls)
+                score, is_valid, stats = self.calculate_robust_score(period_pnls, mode=self.mode)
                 
                 result = {
                     "pair": cand["pair"],
@@ -475,13 +651,34 @@ class RobustStrategyOptimizer:
                 # Write to CSV
                 pair = cand["pair"]
                 config = cand["config"]
-                pnl_values = ','.join([f"{period_pnls.get(j+1, {}).get('pnl', 0):.2f}" for j in range(periods)])
-                row = (f"{pair},{config['indicator_interval']},{config['fast_ma']},"
-                       f"{config['slow_ma']},{config['stop_loss']},{config['take_profit']},"
-                       f"{pnl_values},"
-                       f"{stats.get('mean_pnl', 0):.2f},{stats.get('total_trades', 0)},"
-                       f"{stats.get('mean_accuracy', 0):.1f},{stats.get('mean_sharpe', 0):.2f},"
-                       f"{stats.get('max_drawdown', 0):.1f},{score:.2f},{is_valid}\n")
+                pnl_values = ','.join([f"{period_pnls.get(j+1, {}).get('pnl', 0):.2f}" for j in range(num_periods)])
+                
+                if self.strategy == "rsi_reversion":
+                    trend_val = config['trend_ma_period'] if config['use_trend_filter'] else 0
+                    row = (f"{pair},{config['indicator_interval']},{config['rsi_period']},"
+                           f"{config['rsi_oversold']},{config['rsi_overbought']},{config['bb_period']},"
+                           f"{trend_val},{config['stop_loss']},{config['take_profit']},"
+                           f"{pnl_values},"
+                           f"{stats.get('mean_pnl', 0):.2f},{stats.get('total_trades', 0)},"
+                           f"{stats.get('mean_accuracy', 0):.1f},{stats.get('mean_sharpe', 0):.2f},"
+                           f"{stats.get('max_drawdown', 0):.1f},{score:.2f},{is_valid}\n")
+                elif self.strategy == "bb_grid":
+                    trend_val = config['trend_ma_period'] if config['use_trend_filter'] else 0
+                    row = (f"{pair},{config['indicator_interval']},{config['bb_period']},"
+                           f"{config['bb_std']},{config['entry_threshold']},"
+                           f"{trend_val},{config['stop_loss']},{config['take_profit']},"
+                           f"{pnl_values},"
+                           f"{stats.get('mean_pnl', 0):.2f},{stats.get('total_trades', 0)},"
+                           f"{stats.get('mean_accuracy', 0):.1f},{stats.get('mean_sharpe', 0):.2f},"
+                           f"{stats.get('max_drawdown', 0):.1f},{score:.2f},{is_valid}\n")
+                else:
+                    row = (f"{pair},{config['indicator_interval']},{config['fast_ma']},"
+                           f"{config['slow_ma']},{config['stop_loss']},{config['take_profit']},"
+                           f"{pnl_values},"
+                           f"{stats.get('mean_pnl', 0):.2f},{stats.get('total_trades', 0)},"
+                           f"{stats.get('mean_accuracy', 0):.1f},{stats.get('mean_sharpe', 0):.2f},"
+                           f"{stats.get('max_drawdown', 0):.1f},{score:.2f},{is_valid}\n")
+                           
                 f.write(row)
                 
                 if is_valid:
@@ -499,57 +696,98 @@ class RobustStrategyOptimizer:
         elapsed = time.time() - start_time
         
         # Generate report
-        self._generate_robust_report(robust_results, elapsed, periods)
+        self._generate_robust_report(robust_results, elapsed, periods, target_tokens, windows)
         
         return robust_results
     
-    def _generate_robust_report(self, results, elapsed, periods):
+    def _generate_robust_report(self, results, elapsed, periods, tokens, windows):
         """Generate markdown report for robust discovery."""
         report_file = f"{OUTPUT_DIR}/robust_report_{self.report_id}.md"
         
         # Get window info for report
-        sample_windows = self.get_multi_year_windows(periods=periods)
+        sample_windows = windows
         
         with open(report_file, 'w') as f:
             f.write("# 🔬 Robust Strategy Discovery Report\n\n")
             f.write(f"**Generated**: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n")
-            f.write(f"**Periods Tested**: {periods}\n")
+            f.write(f"**Optimization Mode**: {self.mode.upper()}\n")
+            f.write(f"**Periods Tested**: {len(sample_windows)}\n")
             for w in sample_windows:
-                f.write(f"- {w['label']}: {w['description']}\n")
-            f.write(f"\n**Total Candidates**: {self.iterations * len(TOP_10_TOKENS)}\n")
+                if self.mode == "awfo":
+                    f.write(f"- Step {w['step']}: IS ({w['train_label']}) -> OOS ({w['test_label']})\n")
+                else:
+                    f.write(f"- {w['label']}: {w['description']}\n")
+            f.write(f"\n**Total Candidates**: {self.iterations * len(tokens)}\n")
+            f.write(f"**Total Backtests**: {self.stats['sims_completed'] + self.stats['sims_error']}\n")
             f.write(f"**Valid Robust Strategies**: {len(results)}\n")
-            f.write(f"**Runtime**: {int(elapsed//60)}m {int(elapsed%60)}s\n\n")
+            f.write(f"**Runtime**: {int(elapsed//60)}m {int(elapsed%60)}s\n")
+            f.write(f"**Avg Time/Backtest**: {(elapsed / max(1, self.stats['sims_completed'] + self.stats['sims_error'])):.4f}s\n")
+            f.write(f"**Throughput**: {((self.stats['sims_completed'] + self.stats['sims_error']) / max(1, elapsed)):.2f} sims/sec\n\n")
             
             f.write("---\n\n")
             f.write("## Methodology\n\n")
-            f.write("Each candidate was tested on ALL specified periods independently.\n")
-            f.write("**Criteria for 'Valid'**: Profitable in >= 75% of periods\n")
-            f.write("**Scoring**: `Mean_PnL × √Consistency × (0.5 + 0.5×Stability)`\n\n")
+            if self.mode == "awfo":
+                f.write("Using **Anchored Walk-Forward Optimization (AWFO)**.\n")
+                f.write("- **IS**: In-Sample (Training) data.\n")
+                f.write("- **OOS**: Out-of-Sample (Validation) data. Results below are based on OOS.\n")
+                f.write("- **WFE**: Walk-Forward Efficiency (OOS PnL / IS PnL).\n")
+                f.write("**Criteria for 'Valid'**: Profitable in >= 50% of rolling OOS periods.\n")
+                f.write("**Scoring**: `Mean_OOS_PnL × √Consistency × Stability × WFE_Factor`\n\n")
+            else:
+                f.write("Each candidate was tested on ALL specified periods independently.\n")
+                f.write("**Criteria for 'Valid'**: Profitable in >= 50% of periods\n")
+                f.write("**Scoring**: `Mean_PnL × √Consistency × (0.5 + 0.5×Stability)`\n\n")
             
             f.write("---\n\n")
             f.write("## 🏆 Top Robust Strategies\n\n")
             
             if results:
                 # Table with detailed stats
-                f.write("| Rank | Pair | Interval | Fast/Slow | SL/TP | Mean PnL | Trades | Accuracy | Sharpe | MaxDD | Score |\n")
-                f.write("|------|------|----------|-----------|-------|----------|--------|----------|--------|-------|-------|\n")
+                if self.mode == "awfo":
+                    f.write("| Rank | Pair | Interval | Config (Short) | SL/TP | Mean OOS | WFE | Trades | Accuracy | Sharpe | Score |\n")
+                    f.write("|------|------|----------|----------------|-------|----------|-----|--------|----------|--------|-------|\n")
+                else:
+                    f.write("| Rank | Pair | Interval | Config (Short) | SL/TP | Mean PnL | Trades | Accuracy | Sharpe | MaxDD | Score |\n")
+                    f.write("|------|------|----------|----------------|-------|----------|--------|----------|--------|-------|-------|\n")
                 
                 for i, r in enumerate(results[:20]):
                     cfg = r["config"]
                     s = r["stats"]
-                    f.write(f"| {i+1} | {r['pair']} | {cfg['indicator_interval']} | "
-                           f"{cfg['fast_ma']}/{cfg['slow_ma']} | "
-                           f"{cfg['stop_loss']*100:.0f}%/{cfg['take_profit']*100:.0f}% | "
-                           f"{s.get('mean_pnl', 0):+.1f}% | {s.get('total_trades', 0)} | "
-                           f"{s.get('mean_accuracy', 0):.1f}% | {s.get('mean_sharpe', 0):.2f} | "
-                           f"{s.get('max_drawdown', 0):.1f}% | {r['robust_score']:.1f} |\n")
+                    
+                    if self.strategy == "rsi_reversion":
+                        config_str = f"RSI{cfg['rsi_period']} ({cfg['rsi_oversold']}/{cfg['rsi_overbought']})"
+                    elif self.strategy == "bb_grid":
+                        config_str = f"BB{cfg['bb_period']}/{cfg['bb_std']} (T:{cfg['entry_threshold']})"
+                    else:
+                        config_str = f"MA{cfg['fast_ma']}/{cfg['slow_ma']}"
+                        
+                    if self.mode == "awfo":
+                        f.write(f"| {i+1} | {r['pair']} | {cfg['indicator_interval']} | "
+                               f"{config_str} | "
+                               f"{cfg['stop_loss']*100:.0f}%/{cfg['take_profit']*100:.0f}% | "
+                               f"{s.get('mean_pnl', 0):+.1f}% | {s.get('avg_wfe', 0):.2f} | "
+                               f"{s.get('total_trades', 0)} | {s.get('mean_accuracy', 0):.1f}% | "
+                               f"{s.get('mean_sharpe', 0):.2f} | {r['robust_score']:.1f} |\n")
+                    else:
+                        f.write(f"| {i+1} | {r['pair']} | {cfg['indicator_interval']} | "
+                               f"{config_str} | "
+                               f"{cfg['stop_loss']*100:.0f}%/{cfg['take_profit']*100:.0f}% | "
+                               f"{s.get('mean_pnl', 0):+.1f}% | {s.get('total_trades', 0)} | "
+                               f"{s.get('mean_accuracy', 0):.1f}% | {s.get('mean_sharpe', 0):.2f} | "
+                               f"{s.get('max_drawdown', 0):.1f}% | {r['robust_score']:.1f} |\n")
                 
                 # Period detail table for top 5
                 f.write("\n### 📈 Period Detail for Top 5\n\n")
                 for i, r in enumerate(results[:5]):
                     cfg = r["config"]
                     pr = r["period_results"]
-                    f.write(f"\n**{i+1}. {r['pair']} {cfg['indicator_interval']} Fast={cfg['fast_ma']}/Slow={cfg['slow_ma']}**\n\n")
+                    
+                    if self.strategy == "rsi_reversion":
+                        config_desc = f"RSI={cfg['rsi_period']} ({cfg['rsi_oversold']}/{cfg['rsi_overbought']}) BB={cfg['bb_period']}"
+                    else:
+                        config_desc = f"Fast={cfg['fast_ma']}/Slow={cfg['slow_ma']}"
+                        
+                    f.write(f"\n**{i+1}. {r['pair']} {cfg['indicator_interval']} {config_desc}**\n\n")
                     f.write("| Period | PnL | Trades | Accuracy | Sharpe | MaxDD |\n")
                     f.write("|--------|-----|--------|----------|--------|-------|\n")
                     for win in r["windows"]:
@@ -560,7 +798,7 @@ class RobustStrategyOptimizer:
             else:
                 f.write("❌ **No strategies met the robustness criteria!**\n\n")
                 f.write("This indicates:\n")
-                f.write("- MA Cross strategy may not work well across all market conditions\n")
+                f.write(f"- The selected strategy may not work well across all market conditions\n")
                 f.write("- Consider testing more parameter combinations\n")
                 f.write("- Consider different strategy types\n")
             
@@ -578,32 +816,45 @@ class RobustStrategyOptimizer:
             print(f"\n🏆 Top 3 Robust Strategies:")
             for i, r in enumerate(results[:3]):
                 cfg = r["config"]
+                if self.strategy == "rsi_reversion":
+                    config_desc = f"RSI{cfg['rsi_period']}"
+                else:
+                    config_desc = f"MA{cfg['fast_ma']}/{cfg['slow_ma']}"
+                    
                 print(f"   {i+1}. {r['pair']} {cfg['indicator_interval']} "
-                      f"Fast={cfg['fast_ma']}/Slow={cfg['slow_ma']} | "
+                      f"{config_desc} | "
                       f"Score={r['robust_score']:.1f} | "
-                      f"Mean={r['stats'].get('mean_pnl', 0):.1f}%")
+                      f"Mean={r['stats'].get('mean_pnl', 0):.1f}% | "
+                      f"WFE={r['stats'].get('avg_wfe', 1.0):.2f}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Robust Strategy Optimizer")
-    parser.add_argument("--mode", type=str, choices=["robust"], default="robust")
+    parser.add_argument("--mode", type=str, choices=["robust", "awfo"], default="robust")
     parser.add_argument("--iter", type=int, default=50, help="Candidates per token")
     parser.add_argument("--periods", type=int, default=4, help="Number of annual periods to test")
     parser.add_argument("--tokens", type=str, default="ALL", help="Tokens to test")
     parser.add_argument("--batch_size", type=int, default=250)
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--turbo", action="store_true", default=True)
+    parser.add_argument("--strategy", type=str, choices=["ma_cross", "rsi_reversion", "bb_grid"], default="ma_cross", help="Strategy to optimize")
     
     args = parser.parse_args()
     
-    tokens = TOP_10_TOKENS if args.tokens == "ALL" else args.tokens.split(",")
+    if args.tokens == "ALL":
+        tokens = TOP_10_TOKENS
+    elif "," in args.tokens:
+        tokens = [t.strip() for t in args.tokens.split(",")]
+    else:
+        tokens = [t.strip() for t in args.tokens.split()]
     
     optimizer = RobustStrategyOptimizer(
         mode=args.mode,
         iterations=args.iter,
         batch_size=args.batch_size,
         workers=args.workers,
-        turbo=args.turbo
+        turbo=args.turbo,
+        strategy=args.strategy
     )
     
     optimizer.run_robust_discovery(target_tokens=tokens, periods=args.periods)

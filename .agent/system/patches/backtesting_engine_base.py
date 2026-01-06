@@ -340,6 +340,12 @@ class BacktestingEngineBase:
         Simulates market making strategy over historical data using Event-Driven Jump-Ahead.
         """
         processed_features = self.prepare_market_data()
+        
+        # 🛡️ ROBUST FIX: Handle empty data (e.g., missing historical periods in AWFO)
+        if processed_features.empty:
+            print(f"⚠️ [SIMULATION SKIP] No data available for {self.controller.config.trading_pair} in this period.")
+            return []
+
         self.active_executor_simulations: List[ExecutorSimulation] = []
         self.stopped_executors_info: List[ExecutorInfo] = []
         
