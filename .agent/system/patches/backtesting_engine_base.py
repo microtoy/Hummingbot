@@ -151,7 +151,7 @@ class BacktestingEngineBase:
         for config in self.controller.config.candles_config:
             await self._get_candles_with_cache(config)
 
-    def _load_candle_slice(self, cache_file: Path, needed_start: int, doctors_end: int) -> pd.DataFrame:
+    def _load_candle_slice(self, cache_file: Path, needed_start: int, needed_end: int) -> pd.DataFrame:
         """Loads only the required slice of a CSV or .npy file using indexed seeking logic."""
         import numpy as np
         import json
@@ -173,7 +173,7 @@ class BacktestingEngineBase:
                 ts_col_idx = meta["columns"].index("timestamp")
                 timestamps = data[:, ts_col_idx]
                 
-                mask = (timestamps >= needed_start) & (timestamps <= doctors_end)
+                mask = (timestamps >= needed_start) & (timestamps <= needed_end)
                 if not mask.any():
                     return pd.DataFrame()
                 
@@ -197,7 +197,7 @@ class BacktestingEngineBase:
         # Fallback to CSV slicing (legacy)
         try:
             ts_df = pd.read_csv(cache_file, usecols=["timestamp"])
-            mask = (ts_df["timestamp"] >= needed_start) & (ts_df["timestamp"] <= doctors_end)
+            mask = (ts_df["timestamp"] >= needed_start) & (ts_df["timestamp"] <= needed_end)
             if not mask.any():
                 return pd.DataFrame()
             
@@ -207,7 +207,7 @@ class BacktestingEngineBase:
         except Exception as e:
             print(f"⚠️ [SLICE ERROR] Full load: {e}")
             full_df = pd.read_csv(cache_file)
-            return full_df[(full_df["timestamp"] >= needed_start) & (full_df["timestamp"] <= doctors_end)].copy()
+            return full_df[(full_df["timestamp"] >= needed_start) & (full_df["timestamp"] <= needed_end)].copy()
 
     async def _get_candles_with_cache(self, config: CandlesConfig) -> pd.DataFrame:
         """Helper to get candles with extreme efficiency using binary metadata checks and append mode."""
@@ -521,8 +521,13 @@ class BacktestingEngineBase:
                 backtesting_candles[base_col] = backtesting_candles[bt_col]
         
         backtesting_candles["close_bt_decimal"] = backtesting_candles["close"] # Float Path: Keep as float
-        backtesting_candles.dropna(inplace=True)
         
+        # ⚡ FIX: Use ffill for indicators and prices to prevent 0-value gaps which break charts.
+        # But do NOT ffill signals to avoid "phantom triggers".
+        cols_to_ffill = [c for c in backtesting_candles.columns if c != "signal"]
+        backtesting_candles[cols_to_ffill] = backtesting_candles[cols_to_ffill].ffill()
+        backtesting_candles.fillna(0, inplace=True)
+       
         # ⚡ MEGA-TURBO: Force entire DataFrame to numeric to avoid Decimal leakage from features
         for col in backtesting_candles.columns:
             if col != "timestamp":

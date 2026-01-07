@@ -379,6 +379,9 @@ class RobustStrategyOptimizer:
             
             return results
         except Exception as e:
+            import traceback
+            print(f"\n❌ [NETWORK/API ERROR] {str(e)}")
+            traceback.print_exc()
             with self.stats_lock:
                 self.stats["sims_error"] += len(configs)
             return [{"error": str(e)}] * len(configs)
@@ -540,6 +543,12 @@ class RobustStrategyOptimizer:
                         "config": cand["config"], "backtesting_resolution": "1m", "trade_cost": 0.0006
                     })
         
+        # ⚡ MEMORY OPTIMIZATION: Sort tasks by (start_time, end_time)
+        # This ensures that each batch processed by a worker shares the same time windows,
+        # Maximizing cache hits and preventing OOM from too many unique candles in memory.
+        print("🗂️  Sorting tasks by time window for memory efficiency...")
+        all_tasks.sort(key=lambda x: (x.get("start_time", 0), x.get("end_time", 0)))
+        
         # 3. PROCESS IN PARALLEL BATCHES
         print(f"⚡ Dispatched to {self.workers} workers. Processing...")
         self.stats["total_tasks"] = len(all_tasks)
@@ -565,6 +574,11 @@ class RobustStrategyOptimizer:
             for i, res in enumerate(results):
                 if start_pos + i < len(raw_results):
                     raw_results[start_pos + i] = res
+            
+            # CHECKPOINT: Save partial progress if many results are collected
+            if chunk_idx > 0 and chunk_idx % max(1, total_batches // 10) == 0:
+                self._save_partial_checkpoint(raw_results, all_tasks, all_candidates)
+                
             return len(results)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.workers) as executor:

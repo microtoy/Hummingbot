@@ -661,15 +661,23 @@ async def run_backtesting(backtesting_config: BacktestingConfig):
         # Format response for frontend with optimization
         processed_data_dict = backtesting_results.get("processed_data")
         if processed_data_dict and "features" in processed_data_dict:
-            df = processed_data_dict["features"].fillna(0)
+            df = processed_data_dict["features"]
+            # ⚡ Selective ffill: Prices and indicators only. Signal must stay 0 if missing.
+            cols_to_ffill = [c for c in df.columns if c != "signal"]
+            df[cols_to_ffill] = df[cols_to_ffill].ffill()
+            df = df.fillna(0)
             # Optimization: Downsample if too many rows to avoid JSON serialization timeouts
             if len(df) > 5000:
+                import numpy as np
                 step = len(df) // 5000
-                df = df.iloc[::step]
+                indices = np.arange(0, len(df), step)
+                # ⚡ FIX: Ensure the very last point is always included for a complete chart
+                if indices[-1] != len(df) - 1:
+                    indices = np.append(indices, len(df) - 1)
+                df = df.iloc[indices]
             
             # Ensure timestamp is included and sorted for visualization
             if "timestamp" in df.columns:
-                # reset_index(drop=True) avoids ambiguity if 'timestamp' is also an index level
                 df = df.reset_index(drop=True).sort_values("timestamp")
             
             import asyncio
@@ -891,18 +899,23 @@ def _run_turbo_batch_internal(configs_chunk: list, start: int, end: int, resolut
             original_method = _LOCAL_ENGINE._get_candles_with_cache
             
             async def wrapped_get_candles(config):
-                key = f"{config.connector}_{config.trading_pair}_{config.interval}"
-                # Limit memory cache to avoid OOM on large datasets (360+ days)
-                # If dataframe is huge (>50MB), don't cache it permanently in _CANDLE_CACHE
+                # ⚡ TIME-AWARE KEY: Include start/end to prevent data pollution across windows
+                needed_start = int(_LOCAL_ENGINE.backtesting_data_provider.start_time)
+                needed_end = int(_LOCAL_ENGINE.backtesting_data_provider.end_time)
+                key = f"{config.connector}_{config.trading_pair}_{config.interval}_{needed_start}_{needed_end}"
+                
                 if key in _CANDLE_CACHE:
+                    print(f"DEBUG: [TURBO CACHE HIT] {key}")
+                    # Provide it to the engine's internal feed dict using the engine's internal key
+                    engine_key = _LOCAL_ENGINE.backtesting_data_provider._generate_candle_feed_key(config)
                     attr_name = "candles_feeds" if hasattr(_LOCAL_ENGINE.backtesting_data_provider, "candles_feeds") else "candles_data"
                     feeds = getattr(_LOCAL_ENGINE.backtesting_data_provider, attr_name)
-                    feeds[key] = _CANDLE_CACHE[key]
+                    feeds[engine_key] = _CANDLE_CACHE[key]
                     return _CANDLE_CACHE[key]
                 
+                print(f"DEBUG: [TURBO CACHE MISS] {key}")
                 df = await original_method(config)
-                # Only cache if small enough to not cause OOM across workers
-                # 64GB RAM can safely hold 1M rows (~50MB) x 10 cores
+                # Cache only if small enough to not cause OOM across workers
                 if df is not None and not df.empty and len(df) < 1000000:
                     _CANDLE_CACHE[key] = df
                 return df
@@ -921,10 +934,14 @@ def _run_turbo_batch_internal(configs_chunk: list, start: int, end: int, resolut
                 
                 # ⚡ FIX: Use individual time windows from each config_data
                 # Fallback to shared (start, end) for backward compatibility
-                cfg_start = config_data.get("start_time", start) if isinstance(config_data, dict) else start
-                cfg_end = config_data.get("end_time", end) if isinstance(config_data, dict) else end
+                cfg_start = int(config_data.get("start_time", start) if isinstance(config_data, dict) else start)
+                cfg_end = int(config_data.get("end_time", end) if isinstance(config_data, dict) else end)
                 cfg_resolution = config_data.get("backtesting_resolution", resolution) if isinstance(config_data, dict) else resolution
                 cfg_trade_cost = config_data.get("trade_cost", trade_cost) if isinstance(config_data, dict) else trade_cost
+                
+                # ⚡ CRITICAL FIX: Explicitly update data provider timestamps for this specific run
+                print(f"DEBUG: [TURBO INIT] Start: {cfg_start}, End: {cfg_end}")
+                _LOCAL_ENGINE.backtesting_data_provider.update_backtesting_time(cfg_start, cfg_end)
                 
                 bt_result = await _LOCAL_ENGINE.run_backtesting(
                     controller_config=controller_config,
@@ -970,13 +987,22 @@ def _run_turbo_batch_internal(configs_chunk: list, start: int, end: int, resolut
                 # Only clear at END of batch to allow cache reuse within batch
             except Exception as e:
                 import traceback
-                error_msg = f"{str(e)}\n{traceback.format_exc()}"
+                error_msg = f"❌ [TURBO WORKER ERROR] {str(e)}\n{traceback.format_exc()}"
+                print(error_msg) # Force print to docker logs
                 results.append({
                     "trading_pair": config_data.get("trading_pair", "Unknown"),
                     "error": error_msg,
                     "net_pnl": 0, "net_pnl_quote": 0, "accuracy": 0, "sharpe_ratio": 0,
                     "max_drawdown_pct": 0, "profit_factor": 0, "total_positions": 0
                 })
+            
+            # ⚡ INTER-BATCH MEMORY CHECK: If cache grows too large, clear it mid-batch
+            # This handles cases where a single batch has too many unique time windows.
+            if len(_LOCAL_ENGINE.backtesting_data_provider.candles_feeds) > 20:
+                print(f"🧹 [TURBO GC] Cache reached {len(_LOCAL_ENGINE.backtesting_data_provider.candles_feeds)} windows. Clearing mid-batch.")
+                _LOCAL_ENGINE.backtesting_data_provider.candles_feeds.clear()
+                import gc
+                gc.collect()
         
         # ⚡ BATCH-LEVEL CLEANUP: Only GC once per batch to minimize overhead
         if hasattr(_LOCAL_ENGINE.backtesting_data_provider, "candles_feeds"):
