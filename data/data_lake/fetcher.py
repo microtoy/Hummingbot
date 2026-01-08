@@ -162,13 +162,23 @@ class BinanceFetcher:
         # 转换为 DataFrame
         df = pd.DataFrame(all_data, columns=[
             "timestamp", "open", "high", "low", "close", "volume",
-            "close_time", "quote_asset_volume", "number_of_trades",
-            "taker_buy_base_asset_volume", "taker_buy_quote_asset_volume", "ignore"
+            "close_time", "quote_asset_volume", "n_trades",
+            "taker_buy_base_volume", "taker_buy_quote_volume", "ignore"
         ])
         
-        for col in ["open", "high", "low", "close", "volume"]:
+        # 1. 归一化时间戳为秒 (Float)
+        df["timestamp"] = df["timestamp"].astype(float) / 1000.0
+        
+        # 2. 转换数值列
+        for col in ["open", "high", "low", "close", "volume", "quote_asset_volume", "taker_buy_base_volume", "taker_buy_quote_volume"]:
             df[col] = df[col].astype(float)
-        df["timestamp"] = df["timestamp"].astype(int)
+        
+        # 3. 对齐 V1 的 10 列标准结构
+        v1_columns = [
+            "timestamp", "open", "high", "low", "close", "volume",
+            "quote_asset_volume", "n_trades", "taker_buy_base_volume", "taker_buy_quote_volume"
+        ]
+        df = df[v1_columns]
         
         return df, None
 

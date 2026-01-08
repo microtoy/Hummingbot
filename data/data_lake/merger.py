@@ -33,8 +33,38 @@ class DataMerger:
             logger.warning(f"No data found in lake for {trading_pair} between {start_date} and {end_date}")
             return False
             
-        # 合并并去重
+        # 1. 合并
         merged_df = pd.concat(all_dfs, ignore_index=True)
+        
+        # 2. 归一化校验 (处理可能存在的旧格式分片)
+        if 'timestamp' in merged_df.columns:
+            if merged_df['timestamp'].max() > 1e11: # 毫秒检测
+                merged_df['timestamp'] = merged_df['timestamp'] / 1000.0
+            
+            # 兼容性映射：处理旧格式分片中的长列名
+            compat_map = {
+                "number_of_trades": "n_trades",
+                "taker_buy_base_asset_volume": "taker_buy_base_volume",
+                "taker_buy_quote_asset_volume": "taker_buy_quote_volume"
+            }
+            for old_col, new_col in compat_map.items():
+                if old_col in merged_df.columns and new_col not in merged_df.columns:
+                    merged_df[new_col] = merged_df[old_col]
+            
+            # 统一列名为 V1 规范
+            v1_columns = [
+                "timestamp", "open", "high", "low", "close", "volume",
+                "quote_asset_volume", "n_trades", "taker_buy_base_volume", "taker_buy_quote_volume"
+            ]
+            # 仅保留存在的 V1 列并补齐
+            existing_v1 = [c for c in v1_columns if c in merged_df.columns]
+            merged_df = merged_df[existing_v1]
+            for col in v1_columns:
+                if col not in merged_df.columns:
+                    merged_df[col] = 0.0
+            merged_df = merged_df[v1_columns] # 强制顺序
+
+        # 3. 去重与物理排序
         merged_df.drop_duplicates(subset=['timestamp'], keep='last', inplace=True)
         merged_df.sort_values(by='timestamp', inplace=True)
         
