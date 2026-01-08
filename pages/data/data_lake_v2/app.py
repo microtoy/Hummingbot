@@ -311,7 +311,12 @@ with tab2:
     else:
         st.info("数据湖中暂无分片文件")
 
-# TAB 3: 兼容性桥接
+# --- 兼容性桥接 (Export) ---
+# 检测 Legacy 数据存储路径（兼容 Docker 挂载）
+LEGACY_CANDLES_DIR = "data/candles"
+if os.path.exists("/tmp/hbot_data/candles"):
+    LEGACY_CANDLES_DIR = "/tmp/hbot_data/candles"
+
 with tab3:
     st.subheader("导出至 Hummingbot (Legacy CSV)")
     st.write("将数据湖中的分片合并为 Hummingbot 识别的单一 CSV 文件。")
@@ -321,12 +326,15 @@ with tab3:
         target_interval = st.selectbox("选择粒度", selected_intervals)
         
         output_filename = f"binance_{target_pair}_{target_interval}.csv"
-        st.code(f"目标文件: data/candles/{output_filename}")
+        # 转换显示路径，如果是 Docker 内部路径，显示为用户友好的相对路径
+        display_path = f"data/candles/{output_filename}"
+        st.code(f"目标文件: {display_path}")
         
         if st.button("🖇️ 执行合并并覆盖旧系统数据"):
             from data.data_lake.merger import DataMerger
             merger = DataMerger(LAKE.storage)
-            success = merger.auto_merge_full_history("binance", target_pair, target_interval, f"data/candles/{output_filename}")
+            target_path = os.path.join(LEGACY_CANDLES_DIR, output_filename)
+            success = merger.auto_merge_full_history("binance", target_pair, target_interval, target_path)
             if success:
                 st.success(f"✅ 已成功合并并覆盖 {output_filename}")
             else:
