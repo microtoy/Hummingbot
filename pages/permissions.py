@@ -20,7 +20,6 @@ def public_pages():
         ],
         "Data": [
             st.Page("frontend/pages/data/download_candles/app.py", title="Download Candles", icon="💹", url_path="download_candles"),
-            st.Page("frontend/pages/data/data_quality/app.py", title="Data Quality", icon="📊", url_path="data_quality"),
             st.Page("frontend/pages/data/data_lake_v2/app.py", title="Data Lake V2", icon="🛡️", url_path="data_lake_v2"),
         ],
         "Community Pages": [

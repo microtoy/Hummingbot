@@ -8,15 +8,92 @@ import os
 sys.path.append(os.getcwd())
 
 from data.data_lake.manager import get_lake_manager
-from data.data_management import get_manager as get_v1_manager
 
 st.set_page_config(layout="wide", page_title="Data Lake V2")
 
 LAKE = get_lake_manager()
-V1 = get_v1_manager()
 
 st.title("🛡️ 行情数据管理 V2 (Data Lake)")
 st.info("基于分片存储的数据中心：零锁冲突，极速检测，100% 安全。")
+
+# --- 实时进度中心 (公共层) ---
+st.subheader("📊 实时任务中心")
+
+@st.fragment(run_every="2s")
+def render_progress_center():
+    # 获取最新状态
+    current_status = LAKE.get_status()
+    dl_status = current_status.get("download", {})
+    slots = current_status.get("slots", [])
+    active_workers = len([s for s in slots if s is not None])
+    max_workers = len(slots)
+    
+    if dl_status.get("total", 0) > 0:
+        # 总进度栏 (模仿 V1 风格)
+        percent = dl_status.get("percent", 0)
+        completed = dl_status.get("completed", 0)
+        total = dl_status.get("total", 0)
+        failed = dl_status.get("failed", 0)
+        
+        # 状态与控制项
+        is_paused = LAKE.is_paused()
+        status_emoji = "⏸️ 暂停中" if is_paused else "🚀 运行中"
+        
+        # 使用带有状态描述的进度条
+        status_text = f"总进度: {completed}/{total} ( {percent:.1f}% )"
+        if failed > 0:
+            status_text += f" | ⚠️ {failed} 失败/取消"
+        
+        # 增加并发信息与控制按钮
+        col_prog, col_pause, col_stop = st.columns([3, 1, 1])
+        with col_prog:
+            st.progress(percent / 100, text=status_text)
+            st.caption(f"{status_emoji} | 并发: {active_workers}/{max_workers} | ⚡ 基于 asyncio 高并发引擎")
+        
+        with col_pause:
+            if is_paused:
+                if st.button("▶️ 恢复下载", use_container_width=True, type="primary"):
+                    LAKE.resume_download()
+                    st.rerun()
+            else:
+                if st.button("⏸️ 暂停下载", use_container_width=True):
+                    LAKE.pause_download()
+                    st.rerun()
+        
+        with col_stop:
+            if st.button("⏹️ 终止全部", use_container_width=True, type="secondary", help="清空所有任务列表"):
+                LAKE.stop_download()
+                st.rerun()
+        
+        # 分项下载卡片
+        details = dl_status.get("details", {})
+        if details:
+            # 只展示正在下载或有失败的任务，保持界面简洁
+            active_keys = [k for k, v in details.items() if v["downloading"] > 0 or v["percent"] < 100]
+            if active_keys:
+                cols = st.columns(2)
+                for i, key in enumerate(active_keys[:10]): # 最多展示前 10 个活跃任务
+                    info = details[key]
+                    with cols[i % 2]:
+                        # 简化版分项进度
+                        status_label = f"**{key}** ({info['completed']}/{info['total']} 天)"
+                        if info.get("failed", 0) > 0:
+                            status_label += f" | ⚠️ {info['failed']} 失败"
+                        st.caption(status_label)
+                        st.progress(info["percent"] / 100)
+                        
+                        # 如果有错误信息，展示第一条错误
+                        if info.get("error"):
+                            st.caption(f":red[{info['error']}]")
+                if len(active_keys) > 10:
+                    st.write(f"...等其余 {len(active_keys)-10} 个任务正在排队")
+            else:
+                st.success("✅ 当前批次所有任务已完成")
+    else:
+        st.info("当前无活动任务。在下方配置参数并启动下载。")
+
+render_progress_center()
+st.markdown("---")
 
 # --- SIDEBAR ---
 st.sidebar.header("📊 系统状态")
@@ -141,84 +218,6 @@ with tab1:
             LAKE.start_download(selected_pairs, selected_intervals, date.today() - timedelta(days=2), date.today(), use_proxy=use_proxy, proxy_url=proxy_url)
             st.info("已启动增量同步任务...")
 
-    # --- 实时进度中心 ---
-    st.markdown("---")
-    st.subheader("📊 实时任务中心")
-
-    @st.fragment(run_every="2s")
-    def render_progress_center():
-        # 获取最新状态
-        current_status = LAKE.get_status()
-        dl_status = current_status.get("download", {})
-        slots = current_status.get("slots", [])
-        active_workers = len([s for s in slots if s is not None])
-        max_workers = len(slots)
-        
-        if dl_status.get("total", 0) > 0:
-            # 总进度栏 (模仿 V1 风格)
-            percent = dl_status.get("percent", 0)
-            completed = dl_status.get("completed", 0)
-            total = dl_status.get("total", 0)
-            failed = dl_status.get("failed", 0)
-            
-            # 状态与控制项
-            is_paused = LAKE.is_paused()
-            status_emoji = "⏸️ 暂停中" if is_paused else "🚀 运行中"
-            
-            # 使用带有状态描述的进度条
-            status_text = f"总进度: {completed}/{total} ( {percent:.1f}% )"
-            if failed > 0:
-                status_text += f" | ⚠️ {failed} 失败/取消"
-            
-            # 增加并发信息与控制按钮
-            col_prog, col_pause, col_stop = st.columns([3, 1, 1])
-            with col_prog:
-                st.progress(percent / 100, text=status_text)
-                st.caption(f"{status_emoji} | 并发: {active_workers}/{max_workers} | ⚡ 基于 asyncio 高并发引擎")
-            
-            with col_pause:
-                if is_paused:
-                    if st.button("▶️ 恢复下载", use_container_width=True, type="primary"):
-                        LAKE.resume_download()
-                        st.rerun()
-                else:
-                    if st.button("⏸️ 暂停下载", use_container_width=True):
-                        LAKE.pause_download()
-                        st.rerun()
-            
-            with col_stop:
-                if st.button("⏹️ 终止全部", use_container_width=True, type="secondary", help="清空所有任务列表"):
-                    LAKE.stop_download()
-                    st.rerun()
-            
-            # 分项下载卡片
-            details = dl_status.get("details", {})
-            if details:
-                # 只展示正在下载或有失败的任务，保持界面简洁
-                active_keys = [k for k, v in details.items() if v["downloading"] > 0 or v["percent"] < 100]
-                if active_keys:
-                    cols = st.columns(2)
-                    for i, key in enumerate(active_keys[:10]): # 最多展示前 10 个活跃任务
-                        info = details[key]
-                        with cols[i % 2]:
-                            # 简化版分项进度
-                            status_label = f"**{key}** ({info['completed']}/{info['total']} 天)"
-                            if info.get("failed", 0) > 0:
-                                status_label += f" | ⚠️ {info['failed']} 失败"
-                            st.caption(status_label)
-                            st.progress(info["percent"] / 100)
-                            
-                            # 如果有错误信息，展示第一条错误
-                            if info.get("error"):
-                                st.caption(f":red[{info['error']}]")
-                    if len(active_keys) > 10:
-                        st.write(f"...等其余 {len(active_keys)-10} 个任务正在排队")
-                else:
-                    st.success("✅ 当前批次所有任务已完成")
-        else:
-            st.info("当前无活动任务。在上方配置参数并启动下载。")
-
-    render_progress_center()
 
 # TAB 2: 数据资产
 with tab2:

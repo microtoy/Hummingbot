@@ -1,0 +1,17 @@
+settings:
+  default_connector: binance
+  default_intervals:
+  - 1m
+  - 1h
+  auto_refresh: true
+  refresh_interval_hours: 6
+  max_concurrent_downloads: 5
+symbols:
+- trading_pair: BTC-USDT
+  connector: binance
+  intervals:
+  - 1m
+  - 1h
+  enabled: true
+  priority: 1
+  notes: ''
