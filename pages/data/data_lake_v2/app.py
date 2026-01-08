@@ -71,10 +71,11 @@ def render_progress_center():
             # 只展示正在下载或有失败的任务，保持界面简洁
             active_keys = [k for k, v in details.items() if v["downloading"] > 0 or v["percent"] < 100]
             if active_keys:
-                cols = st.columns(2)
-                for i, key in enumerate(active_keys[:10]): # 最多展示前 10 个活跃任务
+                # 使用 3 列布局以适配 15 线程展示
+                cols = st.columns(3)
+                for i, key in enumerate(active_keys[:15]): # 展示前 15 个活跃任务
                     info = details[key]
-                    with cols[i % 2]:
+                    with cols[i % 3]:
                         # 简化版分项进度
                         status_label = f"**{key}** ({info['completed']}/{info['total']} 天)"
                         if info.get("failed", 0) > 0:
@@ -85,8 +86,8 @@ def render_progress_center():
                         # 如果有错误信息，展示第一条错误
                         if info.get("error"):
                             st.caption(f":red[{info['error']}]")
-                if len(active_keys) > 10:
-                    st.write(f"...等其余 {len(active_keys)-10} 个任务正在排队")
+                if len(active_keys) > 15:
+                    st.write(f"...等其余 {len(active_keys)-15} 个任务正在排队")
             else:
                 st.success("✅ 当前批次所有任务已完成")
     else:
