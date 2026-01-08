@@ -1136,3 +1136,17 @@ async def refresh_candle_mirror():
         return {"status": "success", "message": "Candle mirror refreshed"}
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+
+# =============================================================================
+# 📊 DATA MANAGEMENT ROUTER INTEGRATION
+# =============================================================================
+# Include the data management API endpoints under /data/* path
+
+try:
+    from data.data_management.api_router import router as data_management_router
+    # Mount data management endpoints
+    router.include_router(data_management_router, tags=["Data Management"])
+    print("✅ [DATA MANAGEMENT] API router loaded successfully")
+except Exception as e:
+    print(f"⚠️ [DATA MANAGEMENT] Failed to load API router: {e}")

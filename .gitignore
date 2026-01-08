@@ -169,7 +169,10 @@ auth_password.txt
 
 # Bulky instance data and logs (Sync only custom_strategies/ and custom_configs/)
 /bots/
-/data/
+/data/candles
+/data/candles_cache
+/data/lake
+
 *.db
 *.log
 

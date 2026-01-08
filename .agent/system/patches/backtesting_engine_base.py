@@ -282,7 +282,7 @@ class BacktestingEngineBase:
                 except Exception as e:
                     print(f"⚠️ [DISK ERROR] {e}")
 
-        if min_ts is not None and max_ts is not None:
+        if min_ts is not None and max_ts is not None and not getattr(self, "force_download", False):
             if min_ts <= needed_start and max_ts >= effective_needed_end - 86400:
                 print(f"✅ [CACHE HIT] {filename} covers requirements. Slicing...")
                 result_df = self._load_candle_slice(cache_file, needed_start, needed_end)

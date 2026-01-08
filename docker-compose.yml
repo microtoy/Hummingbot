@@ -15,7 +15,13 @@ services:
       - ./pages:/home/dashboard/frontend/pages
       - ./custom_strategies:/home/dashboard/custom_strategies
       - ./custom_configs:/home/dashboard/custom_configs
+      - ./ProxyManager:/opt/conda/envs/dashboard/lib/python3.12/site-packages/ProxyManager
+      - ./data:/opt/conda/envs/dashboard/lib/python3.12/site-packages/data
+      - ./data/candles:/tmp/hbot_data/candles
+      - ./config:/opt/conda/envs/dashboard/lib/python3.12/site-packages/config
       - ./.agent/system/patches/api_client.py:/opt/conda/envs/dashboard/lib/python3.12/site-packages/hummingbot_api_client/client.py
+      - ./.agent/system/patches/backtesting_engine_base.py:/opt/conda/envs/dashboard/lib/python3.12/site-packages/hummingbot/strategy_v2/backtesting/backtesting_engine_base.py
+      - ./.agent/system/patches/backtesting_router.py:/opt/conda/envs/dashboard/lib/python3.12/site-packages/hummingbot_api_client/backtesting_router.py
     networks:
       - emqx-bridge
   hummingbot-api:
@@ -26,6 +32,7 @@ services:
     volumes:
       - ./bots:/hummingbot-api/bots
       - ./data:/opt/conda/envs/hummingbot-api/lib/python3.12/site-packages/data
+      - ./config:/opt/conda/envs/hummingbot-api/lib/python3.12/site-packages/config
       - ./custom_strategies:/hummingbot-api/bots/controllers/custom
       - ./.agent/system/patches/backtesting_engine_base.py:/opt/conda/envs/hummingbot-api/lib/python3.12/site-packages/hummingbot/strategy_v2/backtesting/backtesting_engine_base.py
       - ./.agent/system/patches/backtesting_router.py:/hummingbot-api/routers/backtesting.py
