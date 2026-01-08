@@ -71,23 +71,24 @@ def render_progress_center():
             # 只展示正在下载或有失败的任务，保持界面简洁
             active_keys = [k for k, v in details.items() if v["downloading"] > 0 or v["percent"] < 100]
             if active_keys:
-                # 使用 3 列布局以适配 15 线程展示
-                cols = st.columns(3)
-                for i, key in enumerate(active_keys[:15]): # 展示前 15 个活跃任务
-                    info = details[key]
-                    with cols[i % 3]:
-                        # 简化版分项进度
-                        status_label = f"**{key}** ({info['completed']}/{info['total']} 天)"
-                        if info.get("failed", 0) > 0:
-                            status_label += f" | ⚠️ {info['failed']} 失败"
-                        st.caption(status_label)
-                        st.progress(info["percent"] / 100)
-                        
-                        # 如果有错误信息，展示第一条错误
-                        if info.get("error"):
-                            st.caption(f":red[{info['error']}]")
-                if len(active_keys) > 15:
-                    st.write(f"...等其余 {len(active_keys)-15} 个任务正在排队")
+                active_keys = [k for k, v in details.items() if v["downloading"] > 0 or v["percent"] < 100]
+                if active_keys:
+                    cols = st.columns(2)
+                    for i, key in enumerate(active_keys[:10]): # 最多展示前 10 个活跃任务
+                        info = details[key]
+                        with cols[i % 2]:
+                            # 简化版分项进度
+                            status_label = f"**{key}** ({info['completed']}/{info['total']} 天)"
+                            if info.get("failed", 0) > 0:
+                                status_label += f" | ⚠️ {info['failed']} 失败"
+                            st.caption(status_label)
+                            st.progress(info["percent"] / 100)
+                            
+                            # 如果有错误信息，展示第一条错误
+                            if info.get("error"):
+                                st.caption(f":red[{info['error']}]")
+                    if len(active_keys) > 10:
+                        st.write(f"...等其余 {len(active_keys)-10} 个任务正在排队")
             else:
                 st.success("✅ 当前批次所有任务已完成")
     else:
@@ -181,25 +182,18 @@ with tab1:
     with col_date2:
         end_date = st.date_input("结束日期", date.today())
         
-    st.subheader("4️⃣ 下载设置")
-    col_set1, col_set2 = st.columns([1, 2])
-    with col_set1:
-        use_proxy = st.checkbox("使用代理下载", value=False)
-    with col_set2:
-        proxy_url = st.text_input("代理地址", value="http://host.docker.internal:7890", disabled=not use_proxy)
-
     st.markdown("---")
     
     col_btn1, col_btn2 = st.columns(2)
     with col_btn1:
         if st.button("🚀 开始下载/补齐测试 (仅前3天)", type="secondary", use_container_width=True):
             test_end = start_date + timedelta(days=min(2, (end_date - start_date).days))
-            LAKE.start_download(selected_pairs, selected_intervals, start_date, test_end, use_proxy=use_proxy, proxy_url=proxy_url)
+            LAKE.start_download(selected_pairs, selected_intervals, start_date, test_end)
             st.success(f"已触发测试下载: {selected_pairs}")
             
     with col_btn2:
         if st.button("🔥 执行全量下载任务", type="primary", use_container_width=True):
-            LAKE.start_download(selected_pairs, selected_intervals, start_date, end_date, use_proxy=use_proxy, proxy_url=proxy_url)
+            LAKE.start_download(selected_pairs, selected_intervals, start_date, end_date)
             st.success(f"已按指定起始范围触发下载")
 
     st.markdown("---")
@@ -208,7 +202,7 @@ with tab1:
     with col_smart1:
         years = st.number_input("补齐历史年限", min_value=1, max_value=10, value=3)
         if st.button("🩹 一键补齐所有缺失历史", use_container_width=True):
-            LAKE.auto_fill_history(selected_pairs, selected_intervals, years=years, use_proxy=use_proxy, proxy_url=proxy_url)
+            LAKE.auto_fill_history(selected_pairs, selected_intervals, years=years)
             st.info("已启动后台历史扫描与补齐功能...")
 
     with col_smart2:
@@ -216,7 +210,7 @@ with tab1:
         st.write(" ") # 占位
         if st.button("🔄 同步更新至最新时刻", use_container_width=True):
             # 将结束日期设为今天
-            LAKE.start_download(selected_pairs, selected_intervals, date.today() - timedelta(days=2), date.today(), use_proxy=use_proxy, proxy_url=proxy_url)
+            LAKE.start_download(selected_pairs, selected_intervals, date.today() - timedelta(days=2), date.today())
             st.info("已启动增量同步任务...")
 
 

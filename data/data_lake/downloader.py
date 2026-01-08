@@ -82,33 +82,17 @@ class LakeTaskScheduler:
     """
     任务调度器：负责根据用户的选择生成任务列表，并管理并发。
     """
-    def __init__(self, storage: LakeStorage, max_workers: int = 15):
+    def __init__(self, storage: LakeStorage, max_workers: int = 5):
         self.storage = storage
         self.downloader = DailyDownloader(storage)
         self.max_workers = max_workers
         self.tasks: List[LakeDownloadTask] = []
-        # _slots 现在存储分配到的代理节点名称
         self._slots: List[Optional[str]] = [None] * max_workers
         self._running = False
         self._stop_signal = False
         self._pause_event = asyncio.Event()
         self._pause_event.set() # 默认不暂停
         self._loop: Optional[asyncio.AbstractEventLoop] = None # 记录运行时的 loop
-        
-        # 代理控制器集成
-        self._clash = None
-        self._monitor = None
-        try:
-            from ProxyManager.ClashController import ClashController
-            from ProxyManager.ProxyHealthMonitor import ProxyHealthMonitor
-            self._clash = ClashController(
-                clash_bin_path="mihomo", 
-                config_file="clash_work_dir/config.yaml",
-                work_dir="clash_work_dir"
-            )
-            self._monitor = ProxyHealthMonitor()
-        except Exception as e:
-            logger.warning(f"⚠️ ProxyManager initialization failed: {e}")
 
     def cancel_tasks(self):
         """全面清空下载任务 (终止)"""
@@ -172,71 +156,46 @@ class LakeTaskScheduler:
         start_date = end_date - timedelta(days=365 * years_back)
         self.add_tasks(pairs, intervals, start_date, end_date)
 
-    async def run(self, use_proxy: bool = True, proxy_url: str = "http://host.docker.internal:7890"):
-        """启动调度执行 (增强版：支持 15 代理并发隔离)"""
+    async def run(self):
+        """启动调度执行"""
         if self._running:
             return
         self._running = True
         self._stop_signal = False
-        self._loop = asyncio.get_running_loop()
+        self._loop = asyncio.get_running_loop() # 捕获当前 loop
         
-        # 1. 如果使用代理，初始化 15 个物理节点
-        node_names = []
-        if use_proxy and self._clash and self._monitor:
-            try:
-                available = await self._clash.get_proxies()
-                node_names = self._monitor.get_best_proxies(available, strategy="fastest", count=self.max_workers)
-                logger.info(f"🚀 Selected {len(node_names)} proxy nodes for concurrency.")
-            except Exception as e:
-                logger.error(f"Failed to fetch proxy nodes: {e}")
-
         semaphore = asyncio.Semaphore(self.max_workers)
+        
+        # 定义待处理任务
         pending_tasks = [t for t in self.tasks if t.status == "pending"]
         
         async def worker(task: LakeDownloadTask):
             if self._stop_signal: return
+            
+            # 💡 暂停检查点
             await self._pause_event.wait()
             
             async with semaphore:
                 if self._stop_signal: return
-                await self._pause_event.wait()
+                await self._pause_event.wait() # 进入临界区前再次检查
                 
-                # 寻找空槽位 (1-15)
+                # 寻找空槽位分配 Proxy (模拟 logic)
                 slot_idx = -1
                 for i in range(self.max_workers):
                     if self._slots[i] is None:
-                        # 分配一个节点名或标记占坑
-                        self._slots[i] = node_names[i] if i < len(node_names) else "DEFAULT"
+                        self._slots[i] = f"S{i+1}"
                         slot_idx = i
                         break
                 
-                if slot_idx != -1:
-                    # 槽位 ID 为 1-indexed
-                    browser_id = slot_idx + 1
-                    node_name = self._slots[slot_idx]
-                    task.proxy_id = f"Slot-{browser_id} ({node_name})"
-                    
-                    # 构造该槽位专属的本地代理 URL (对应 Clash Listener 端口 10000+browser_id)
-                    # 只有在 node_name 不是 DEFAULT 且 Clash 可用时才真切换
-                    current_proxy = proxy_url
-                    if use_proxy and node_name != "DEFAULT" and self._clash:
-                        # 切换该端口到对应节点
-                        await self._clash.switch_proxy(browser_id, node_name)
-                        current_proxy = f"http://host.docker.internal:{10000 + browser_id}"
-                    
+                if slot_idx != -1: 
+                    task.proxy_id = self._slots[slot_idx]
                     try:
-                        await self.downloader.download_day(task, current_proxy)
+                        await self.downloader.download_day(task)
                     finally:
-                        # 释放槽位
                         self._slots[slot_idx] = None
 
         if pending_tasks:
-            # 限制初始并发爆发，平滑启动
-            tasks = []
-            for t in pending_tasks:
-                tasks.append(worker(t))
-            await asyncio.gather(*tasks)
-            
+            await asyncio.gather(*(worker(t) for t in pending_tasks))
         self._running = False
 
     def get_progress(self) -> Dict:

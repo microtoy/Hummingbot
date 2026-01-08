@@ -29,7 +29,7 @@ class LakeManager:
             return
             
         self.storage = LakeStorage()
-        self.scheduler = LakeTaskScheduler(self.storage, max_workers=15)
+        self.scheduler = LakeTaskScheduler(self.storage, max_workers=5)
         self._last_summary = None
         self._last_summary_time = 0
         self._initialized = True
@@ -44,13 +44,13 @@ class LakeManager:
         else:
             return await fetcher.get_top_trading_pairs(limit)
 
-    def start_download(self, pairs: List[str], intervals: List[str], start_date: date, end_date: date, use_proxy: bool = False, proxy_url: str = "http://host.docker.internal:7890"):
+    def start_download(self, pairs: List[str], intervals: List[str], start_date: date, end_date: date):
         """
         灵活下载入口：支持多币种、多周期、任意日期。
         """
         def _bg_run():
             self.scheduler.add_tasks(pairs, intervals, start_date, end_date)
-            self._run_async_tasks(use_proxy, proxy_url)
+            self._run_async_tasks()
             
         threading.Thread(target=_bg_run, daemon=True).start()
 
@@ -70,35 +70,35 @@ class LakeManager:
         """检查是否处于暂停状态"""
         return not self.scheduler._pause_event.is_set()
 
-    def auto_fill_history(self, pairs: List[str], intervals: List[str], years: int = 3, use_proxy: bool = False, proxy_url: str = "http://host.docker.internal:7890"):
+    def auto_fill_history(self, pairs: List[str], intervals: List[str], years: int = 3):
         """
         一键补齐历史数据逻辑。
         """
         def _bg_run():
             # auto_fill_gaps 现在是同步的或简单的包装
             asyncio.run(self.scheduler.auto_fill_gaps(pairs, intervals, years))
-            self._run_async_tasks(use_proxy, proxy_url)
+            self._run_async_tasks()
             
         threading.Thread(target=_bg_run, daemon=True).start()
 
-    def _trigger_background_run(self, use_proxy: bool = False, proxy_url: str = "http://host.docker.internal:7890"):
+    def _trigger_background_run(self):
         """启动后台运行"""
-        threading.Thread(target=self._run_async_tasks, args=(use_proxy, proxy_url), daemon=True).start()
+        threading.Thread(target=self._run_async_tasks, daemon=True).start()
 
-    async def _run_scheduler(self, use_proxy: bool = False, proxy_url: str = "http://host.docker.internal:7890"):
+    async def _run_scheduler(self):
         """异步执行调度"""
         try:
-            await self.scheduler.run(use_proxy, proxy_url)
+            await self.scheduler.run()
         except Exception as e:
             logger.error(f"Scheduler failed: {e}")
 
-    def _run_async_tasks(self, use_proxy: bool = False, proxy_url: str = "http://host.docker.internal:7890"):
+    def _run_async_tasks(self):
         """后台运行调度任务"""
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
             # 使用 create_task 包装
-            loop.run_until_complete(self._run_scheduler(use_proxy, proxy_url))
+            loop.run_until_complete(self._run_scheduler())
         finally:
             loop.close()
 
