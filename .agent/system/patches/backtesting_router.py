@@ -449,7 +449,8 @@ async def get_candles_status():
                     fh.readline()
                     first_line = fh.readline()
                     if first_line:
-                        min_ts = int(float(first_line.split(b',')[0]))
+                        val = float(first_line.split(b',')[0])
+                        min_ts = int(val / 1000) if val > 1e11 else int(val)
                     
                     # 2. End TS (last 1KB)
                     fh.seek(0, 2)
@@ -458,7 +459,8 @@ async def get_candles_status():
                     for line in reversed(last_lines):
                         if line.strip() and b',' in line:
                             try:
-                                max_ts = int(float(line.split(b',')[0]))
+                                val = float(line.split(b',')[0])
+                                max_ts = int(val / 1000) if val > 1e11 else int(val)
                                 break
                             except: continue
                     
@@ -558,7 +560,9 @@ async def sync_candles(backtesting_config: BacktestingConfig):
                     # Start TS
                     f.readline() # Header
                     first_line = f.readline()
-                    if first_line: min_ts = int(float(first_line.split(b',')[0]))
+                    if first_line: 
+                        val = float(first_line.split(b',')[0])
+                        min_ts = int(val/1000) if val > 1e11 else int(val)
                     
                     # End TS & Fast Count Estimate
                     f.seek(0, 2)
@@ -568,7 +572,8 @@ async def sync_candles(backtesting_config: BacktestingConfig):
                     for line in reversed(last_lines):
                         if line.strip() and b',' in line:
                             try:
-                                max_ts = int(float(line.split(b',')[0]))
+                                val = float(line.split(b',')[0])
+                                max_ts = int(val/1000) if val > 1e11 else int(val)
                                 break
                             except: continue
                 
