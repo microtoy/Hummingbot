@@ -332,52 +332,85 @@ if os.path.exists("/tmp/hbot_data/candles"):
     LEGACY_CANDLES_DIR = "/tmp/hbot_data/candles"
 
 with tab3:
-    st.subheader("导出至 Hummingbot (Legacy CSV)")
-    st.write("将数据湖中的分片合并为 Hummingbot 识别的单一 CSV 文件。")
+    st.subheader("导出与回测优化")
+    
+    # ⚡ NEW: Direct Loading Info
+    st.info("🚀 **V2 引擎直连已开启**：回测引擎（Single/Batch/Turbo）现在可以直接读取数据湖分片。您不再需要执行导出操作即可开始回测！")
+    
+    st.write("---")
     
     # 获取最新状态
     export_status = LAKE.get_status()
     available_data = export_status["storage"]["pairs"]
+    
     if available_data:
-        # Extract available pairs from storage keys (format: exchange:pair:interval)
-        # We only care about the pair part
-        all_stored_pairs = sorted(list(set([k.split(":")[1] for k in available_data.keys()])))
+        col_exp, col_turbo = st.columns(2)
         
-        target_pair = st.selectbox("选择要导出的币种", all_stored_pairs)
-        
-        # Filter available intervals for the selected pair
-        pair_intervals = sorted(list(set([k.split(":")[2] for k in available_data.keys() if k.split(":")[1] == target_pair])))
-        if not pair_intervals:
-            st.warning("该币种暂无已下载数据")
-            target_interval = None
-        else:
-            target_interval = st.selectbox("选择粒度", pair_intervals)
-        
-        if target_interval:
-            output_filename = f"binance_{target_pair}_{target_interval}.csv"
-            # 转换显示路径，如果是 Docker 内部路径，显示为用户友好的相对路径
-            display_path = f"data/candles/{output_filename}"
-            st.code(f"目标文件: {display_path}")
+        # --- LEFT: TURBO WARMUP (New Recommendation) ---
+        with col_exp:
+            st.markdown("#### ⚡ 预热 Turbo 缓存 (推荐)")
+            st.write("直接为回测引擎生成二进制缓存，不创建冗余 CSV，**省空间、极速性能**。")
             
-            if st.button("🖇️ 执行合并并覆盖旧系统数据"):
+            all_stored_pairs = sorted(list(set([k.split(":")[1] for k in available_data.keys()])))
+            t_pair_turbo = st.selectbox("选择币种", all_stored_pairs, key="warmup_pair")
+            t_int_turbo = st.selectbox("选择粒度", 
+                                        sorted(list(set([k.split(":")[2] for k in available_data.keys() if k.split(":")[1] == t_pair_turbo]))),
+                                        key="warmup_int")
+            
+            if st.button("🔥 生成加速缓存 (.npy)"):
+                with st.spinner("正在并行读取分片并生成缓存..."):
+                    from hummingbot.strategy_v2.backtesting.backtesting_engine_base import BacktestingEngineBase
+                    from hummingbot.data_feed.candles_feed.data_types import CandlesConfig
+                    
+                    engine = BacktestingEngineBase()
+                    engine.allow_download = False
+                    
+                    # Get coverage range
+                    key = f"binance:{t_pair_turbo}:{t_int_turbo}"
+                    p_info = available_data[key]
+                    start_ts = int(datetime.combine(p_info["start"], datetime.min.time()).timestamp())
+                    end_ts = int(datetime.combine(p_info["end"], datetime.max.time()).timestamp())
+                    
+                    config = CandlesConfig(
+                        connector="binance", 
+                        trading_pair=t_pair_turbo, 
+                        interval=t_int_turbo, 
+                        max_records=100
+                    )
+                    
+                    # This call will trigger LakeLoader and then _save_binary_cache
+                    # We set provider range to cover all available data
+                    engine.backtesting_data_provider.start_time = start_ts
+                    engine.backtesting_data_provider.end_time = end_ts
+                    
+                    try:
+                        import asyncio
+                        asyncio.run(engine._get_candles_with_cache(config))
+                        st.success(f"✅ 缓存预热成功！{t_pair_turbo} 现在在 Turbo 模式下可瞬时加载。")
+                    except Exception as e:
+                        st.error(f"❌ 预热失败: {e}")
+
+        # --- RIGHT: LEGACY EXPORT ---
+        with col_turbo:
+            st.markdown("#### 🖇️ 导出 Legacy CSV (可选)")
+            st.write("将分片合并为单一 CSV 大文件，用于 Excel 或外部工具。")
+            
+            t_pair_legacy = st.selectbox("选择币种", all_stored_pairs, key="legacy_pair")
+            t_int_legacy = st.selectbox("选择粒度", 
+                                         sorted(list(set([k.split(":")[2] for k in available_data.keys() if k.split(":")[1] == t_pair_legacy]))),
+                                         key="legacy_int")
+            
+            if st.button("🖇️ 执行合并并覆盖"):
                 from data.data_lake.merger import DataMerger
                 merger = DataMerger(LAKE.storage)
+                output_filename = f"binance_{t_pair_legacy}_{t_int_legacy}.csv"
                 target_path = os.path.join(LEGACY_CANDLES_DIR, output_filename)
                 
-                # Check actual rows before merging to warn about empty files
-                # This helps user realize if their 'downloader.py' revert caused data loss
-                total_rows = 0
-                key = f"binance:{target_pair}:{target_interval}"
-                if key in available_data:
-                    total_rows = available_data[key].get('total_rows', 0)
-                
-                if total_rows == 0:
-                    st.error("⚠️ 警告：源数据包含 0 行记录！导出结果将为空。请检查 downloader.py 是否存在单位混淆 Bug。")
+                success = merger.auto_merge_full_history("binance", t_pair_legacy, t_int_legacy, target_path)
+                if success:
+                    st.success(f"✅ 已导出至 data/candles/{output_filename}")
                 else:
-                    success = merger.auto_merge_full_history("binance", target_pair, target_interval, target_path)
-                    if success:
-                        st.success(f"✅ 已成功合并并覆盖 {output_filename} ({total_rows} rows)")
-                    else:
-                        st.error("❌ 导出失败：请确认数据湖中已下载相关数据")
+                    st.error("❌ 导出失败")
+
     else:
         st.warning("数据湖中暂无任何数据，请先去 Tab 1 下载。")

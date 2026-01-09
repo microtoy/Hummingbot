@@ -18,6 +18,7 @@ from hummingbot.core.data_type.common import LazyDict, TradeType
 # ⚡ MEGA-TURBO: Persistent mounted data path for fallback
 MOUNTED_DATA_PATH = "/opt/conda/envs/hummingbot-api/lib/python3.12/site-packages/data"
 from hummingbot.data_feed.candles_feed.data_types import CandlesConfig
+from data.data_lake.loader import LakeLoader
 from hummingbot.exceptions import InvalidController
 from hummingbot.strategy_v2.backtesting.backtesting_data_provider import BacktestingDataProvider
 from hummingbot.strategy_v2.backtesting.executor_simulator_base import ExecutorSimulation
@@ -290,6 +291,51 @@ class BacktestingEngineBase:
                 self.backtesting_data_provider.candles_feeds[key] = result_df
                 return result_df
 
+        # --- NEW: V2 LAKE DIRECT LOAD ---
+        # If cache is missing or insufficient, try pulling directly from our partitioned Lake V2
+        try:
+            print(f"🌊 [V2 LAKE] Attempting direct load for {config.connector}:{config.trading_pair}:{config.interval}")
+            print(f"📅 [V2 RANGE] {needed_start} -> {effective_needed_end}")
+            loader = LakeLoader()
+            lake_df = loader.get_data(
+                exchange=config.connector, 
+                pair=config.trading_pair, 
+                interval=config.interval, 
+                start_ts=needed_start, 
+                end_ts=effective_needed_end
+            )
+            
+            if lake_df is not None and not lake_df.empty:
+                print(f"✅ [V2 LAKE HIT] Loaded {len(lake_df)} rows from lake for {config.trading_pair}")
+                
+                # Merge with existing local CSV if present
+                if cache_file.exists():
+                    try:
+                        old_df = pd.read_csv(cache_file)
+                        lake_df = pd.concat([old_df, lake_df]).drop_duplicates(subset=["timestamp"]).sort_values("timestamp")
+                        print(f"🔄 [V2 MERGE] Merged lake data with existing cache. Total: {len(lake_df)} rows")
+                    except Exception as me:
+                        print(f"⚠️ [V2 MERGE ERROR] {me}")
+                
+                # Update persistent storage
+                lake_df.to_csv(cache_file, index=False)
+                self._save_binary_cache(cache_file, lake_df)
+                
+                # Return slice
+                result_df = lake_df[(lake_df["timestamp"] >= needed_start) & (lake_df["timestamp"] <= needed_end)].copy()
+                if not result_df.empty:
+                    key = self.backtesting_data_provider._generate_candle_feed_key(config)
+                    self.backtesting_data_provider.candles_feeds[key] = result_df
+                    return result_df
+                else:
+                    print(f"⚠️ [V2 SLICE EMPTY] Lake DF had data, but slice {needed_start}->{needed_end} was empty!")
+            else:
+                print(f"❌ [V2 LAKE MISS] No data found in lake for {config.connector}:{config.trading_pair} in range {needed_start}->{effective_needed_end}")
+        except Exception as e:
+            print(f"⚠️ [V2 LAKE ERROR] {e}")
+            import traceback
+            traceback.print_exc()
+
         # 2. DOWNLOAD / SYNC logic (Only if allowed)
         if not self.allow_download:
              raise ValueError(f"❌ [CACHE INSUFFICIENT] {filename} coverage: {min_ts}->{max_ts} vs Needed: {needed_start}->{effective_needed_end}")
@@ -334,6 +380,31 @@ class BacktestingEngineBase:
              return result_df
         
         return pd.DataFrame()
+
+    def _save_binary_cache(self, cache_file: Path, df: pd.DataFrame):
+        """Generates .npy and .json cache for ultra-fast loading."""
+        try:
+            import numpy as np
+            import json
+            
+            # Save raw numpy array
+            npy_file = cache_file.with_suffix(".npy")
+            np.save(str(npy_file), df.to_numpy())
+            
+            # Save metadata
+            meta = {
+                "columns": df.columns.tolist(),
+                "dtypes": {col: str(dtype) for col, dtype in df.dtypes.items()},
+                "min_ts": int(df["timestamp"].min()),
+                "max_ts": int(df["timestamp"].max()),
+                "count": len(df)
+            }
+            with open(cache_file.with_suffix(".json"), 'w') as f:
+                json.dump(meta, f)
+                
+            print(f"⚡ [CACHE GEN] Generated binary cache for {cache_file.name}")
+        except Exception as e:
+            print(f"⚠️ [CACHE GEN ERROR] {e}")
 
     async def simulate_execution(self, trade_cost: float) -> list:
         """
