@@ -44,13 +44,7 @@ def render_progress_center():
         if failed > 0:
             status_text += f" | ⚠️ {failed} 失败/取消"
         
-        # 增加并发信息与控制按钮
-        with col_stop:
-            if st.button("⏹️ 终止全部", use_container_width=True, type="secondary", help="清空所有任务列表"):
-                LAKE.stop_download()
-                st.rerun()
-        
-        # 增加并发信息与控制按钮
+        # 布局：进度条 + 控制按钮
         col_prog, col_ctl = st.columns([3, 2])
         with col_prog:
             st.progress(percent / 100, text=status_text)
@@ -94,8 +88,12 @@ def render_progress_center():
                     for i, key in enumerate(active_keys[:10]): # 最多展示前 10 个活跃任务
                         info = details[key]
                         with cols[i % 2]:
-                            # 简化版分项进度
-                            status_label = f"**{key}** ({info['completed']}/{info['total']} 天)"
+                            # 简化版分项进度 (增加日期范围)
+                            start_str = info.get('start_date', '-')
+                            end_str = info.get('end_date', '-')
+                            if hasattr(start_str, 'isoformat'): start_str = start_str.isoformat()
+                            if hasattr(end_str, 'isoformat'): end_str = end_str.isoformat()
+                            status_label = f"**{key}** | 📅 {start_str} → {end_str} | ({info['completed']}/{info['total']} 天)"
                             if info.get("failed", 0) > 0:
                                 status_label += f" | ⚠️ {info['failed']} 失败"
                             st.caption(status_label)
@@ -233,95 +231,99 @@ with tab1:
 
 # TAB 2: 数据资产
 with tab2:
-    c1, c2 = st.columns([5, 1])
-    with c1:
-        st.subheader("数据湖存储详情")
-    with c2:
-        if st.button("🔍 深度质检", help="物理扫描每个文件，核对行数 (1m=1440, 1h=24)"):
-            LAKE.get_status(audit=True)
-            st.rerun()
-
-    def render_coverage_ribbon(bits):
-        if not bits: return ""
-        # 使用 CSS Gradient 生成像条形码一样的状态线
-        colors = []
-        step = 100 / len(bits)
-        for i, b in enumerate(bits):
-            color = "#2E7D32" if b == 1 else "#E0E0E0" # 绿色 vs 灰色
-            colors.append(f"{color} {i*step}%")
-            colors.append(f"{color} {(i+1)*step}%")
+    @st.fragment(run_every="5s")
+    def render_data_assets():
+        """数据资产概览 - 自动刷新"""
+        c1, c2 = st.columns([5, 1])
+        with c1:
+            st.subheader("数据湖存储详情")
+        with c2:
+            if st.button("🔍 深度质检", help="物理扫描每个文件，核对行数 (1m=1440, 1h=24)", key="deep_audit"):
+                LAKE.get_status(audit=True)
+                st.rerun()
         
-        gradient = ", ".join(colors)
-        html = f"""
-        <div style="
-            width: 100%; 
-            height: 12px; 
-            background: linear-gradient(90deg, {gradient}); 
-            border-radius: 6px;
-            margin: 5px 0;
-            box-shadow: inset 0 1px 2px rgba(0,0,0,0.1);
-        "></div>
-        """
-        return html
+        # 每次刷新都获取最新状态
+        fresh_status = LAKE.get_status()
+        
+        def render_coverage_ribbon(bits):
+            if not bits: return ""
+            colors = []
+            step = 100 / len(bits)
+            for i, b in enumerate(bits):
+                color = "#2E7D32" if b == 1 else "#E0E0E0"
+                colors.append(f"{color} {i*step}%")
+                colors.append(f"{color} {(i+1)*step}%")
+            
+            gradient = ", ".join(colors)
+            html = f"""
+            <div style="
+                width: 100%; 
+                height: 12px; 
+                background: linear-gradient(90deg, {gradient}); 
+                border-radius: 6px;
+                margin: 5px 0;
+                box-shadow: inset 0 1px 2px rgba(0,0,0,0.1);
+            "></div>
+            """
+            return html
 
-    pairs_data = status["storage"]["pairs"]
-    if pairs_data:
-        for k, v in pairs_data.items():
-            with st.container():
-                col1, col2, col3 = st.columns([2, 2, 1])
-                with col1:
-                    st.markdown(f"**{k}**")
-                with col2:
-                    start_str = v.get('start').isoformat() if v.get('start') else "-"
-                    end_str = v.get('end').isoformat() if v.get('end') else "-"
-                    st.write(f"📅 {start_str} 至 {end_str}")
-                with col3:
-                    rows = v.get('total_rows', 0)
-                    st.write(f"📈 {rows:,} 条记录")
-                
-                # 第二行详情
-                m_col1, m_col2, m_col3, m_col4 = st.columns([3, 1, 1, 1])
-                with m_col1:
-                    # 渲染状态线
-                    parts = k.split(":")
-                    if len(parts) == 3:
-                        bits = LAKE.storage.get_coverage(parts[0], parts[1], parts[2])
-                        st.markdown(render_coverage_ribbon(bits), unsafe_allow_html=True)
-                
-                with m_col2:
-                    missing_count = v.get('missing_days', 0)
-                    if missing_count > 0:
-                        # 使用 expander 展示具体日期
-                        with st.expander(f"🩹 {missing_count} 天缺口"):
-                            parts = k.split(":")
-                            missing_list = LAKE.storage.get_missing_days(parts[0], parts[1], parts[2])
-                            st.write([d.isoformat() for d in missing_list[:50]])
-                    else:
-                        st.write("✅ 范围完整")
-                
-                with m_col3:
-                    incomplete_count = v.get('incomplete_days', 0)
-                    if incomplete_count > 0:
-                        with st.expander(f"⚠️ {incomplete_count} 天异常", help="行数不足的天数"):
-                            st.write(v.get('incomplete_list', [])[:50])
-                    else:
-                        st.write("💎 内容完整")
-                
-                with m_col4:
-                    if st.button("🛠️ 深度修补", key=f"repair_{k}", help="补齐缺失并重刷异常天"):
+        pairs_data = fresh_status["storage"]["pairs"]
+        if pairs_data:
+            for k, v in pairs_data.items():
+                with st.container():
+                    col1, col2, col3 = st.columns([2, 2, 1])
+                    with col1:
+                        st.markdown(f"**{k}**")
+                    with col2:
+                        start_str = v.get('start').isoformat() if v.get('start') else "-"
+                        end_str = v.get('end').isoformat() if v.get('end') else "-"
+                        st.write(f"📅 {start_str} 至 {end_str}")
+                    with col3:
+                        rows = v.get('total_rows', 0)
+                        st.write(f"📈 {rows:,} 条记录")
+                    
+                    # 第二行详情
+                    m_col1, m_col2, m_col3, m_col4 = st.columns([3, 1, 1, 1])
+                    with m_col1:
                         parts = k.split(":")
-                        # 清理异常文件以便重新下载
-                        for d_str in v.get('incomplete_list', []):
-                            try:
-                                path = LAKE.storage.get_partition_path(parts[0], parts[1], parts[2], d_str)
-                                if path.exists(): path.unlink()
-                            except: pass
-                        
-                        LAKE.start_download([parts[1]], [parts[2]], v['start'], v['end'])
-                        st.toast(f"已启动 {parts[1]} 深度修补任务")
-                st.markdown("---")
-    else:
-        st.info("数据湖中暂无分片文件")
+                        if len(parts) == 3:
+                            bits = LAKE.storage.get_coverage(parts[0], parts[1], parts[2])
+                            st.markdown(render_coverage_ribbon(bits), unsafe_allow_html=True)
+                    
+                    with m_col2:
+                        missing_count = v.get('missing_days', 0)
+                        if missing_count > 0:
+                            with st.expander(f"🩹 {missing_count} 天缺口"):
+                                parts = k.split(":")
+                                missing_list = LAKE.storage.get_missing_days(parts[0], parts[1], parts[2])
+                                st.write([d.isoformat() for d in missing_list[:50]])
+                        else:
+                            st.write("✅ 范围完整")
+                    
+                    with m_col3:
+                        incomplete_count = v.get('incomplete_days', 0)
+                        if incomplete_count > 0:
+                            with st.expander(f"⚠️ {incomplete_count} 天异常", help="行数不足的天数"):
+                                st.write(v.get('incomplete_list', [])[:50])
+                        else:
+                            st.write("💎 内容完整")
+                    
+                    with m_col4:
+                        if st.button("🛠️ 深度修补", key=f"repair_{k}", help="补齐缺失并重刷异常天"):
+                            parts = k.split(":")
+                            for d_str in v.get('incomplete_list', []):
+                                try:
+                                    path = LAKE.storage.get_partition_path(parts[0], parts[1], parts[2], d_str)
+                                    if path.exists(): path.unlink()
+                                except: pass
+                            
+                            LAKE.start_download([parts[1]], [parts[2]], v['start'], v['end'])
+                            st.toast(f"已启动 {parts[1]} 深度修补任务")
+                    st.markdown("---")
+        else:
+            st.info("数据湖中暂无分片文件")
+    
+    render_data_assets()
 
 # --- 兼容性桥接 (Export) ---
 # 检测 Legacy 数据存储路径（兼容 Docker 挂载）
@@ -333,7 +335,9 @@ with tab3:
     st.subheader("导出至 Hummingbot (Legacy CSV)")
     st.write("将数据湖中的分片合并为 Hummingbot 识别的单一 CSV 文件。")
     
-    available_data = status["storage"]["pairs"]
+    # 获取最新状态
+    export_status = LAKE.get_status()
+    available_data = export_status["storage"]["pairs"]
     if available_data:
         # Extract available pairs from storage keys (format: exchange:pair:interval)
         # We only care about the pair part

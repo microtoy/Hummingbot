@@ -140,6 +140,9 @@ class LakeManager:
             loop.run_until_complete(self._run_scheduler())
         finally:
             loop.close()
+            # ⚡ 下载完成后自动清除缓存，确保数据资产概览显示最新状态
+            self.force_refresh_status()
+            logger.info("📊 Download batch completed, status cache refreshed.")
 
     def get_status(self, audit: bool = False) -> Dict:
         """获取系统全面状态 (带缓存避免阻塞 UI)"""

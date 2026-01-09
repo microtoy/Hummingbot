@@ -213,7 +213,10 @@ class LakeTaskScheduler:
         for t in self.tasks:
             key = f"{t.trading_pair}:{t.interval}"
             if key not in details:
-                details[key] = {"total": 0, "completed": 0, "failed": 0, "downloading": 0, "error": None}
+                details[key] = {
+                    "total": 0, "completed": 0, "failed": 0, "downloading": 0, 
+                    "error": None, "start_date": None, "end_date": None
+                }
             
             details[key]["total"] += 1
             if t.status == "completed": details[key]["completed"] += 1
@@ -222,6 +225,12 @@ class LakeTaskScheduler:
                 if t.error and not details[key]["error"]:
                     details[key]["error"] = t.error # 记录该组任务遇到的第一个错误
             elif t.status == "downloading": details[key]["downloading"] += 1
+            
+            # 记录日期范围
+            if details[key]["start_date"] is None or t.day < details[key]["start_date"]:
+                details[key]["start_date"] = t.day
+            if details[key]["end_date"] is None or t.day > details[key]["end_date"]:
+                details[key]["end_date"] = t.day
 
         # 计算详细进度的百分比
         for k in details:
