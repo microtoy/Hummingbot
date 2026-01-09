@@ -45,25 +45,42 @@ def render_progress_center():
             status_text += f" | ⚠️ {failed} 失败/取消"
         
         # 增加并发信息与控制按钮
-        col_prog, col_pause, col_stop = st.columns([3, 1, 1])
-        with col_prog:
-            st.progress(percent / 100, text=status_text)
-            st.caption(f"{status_emoji} | 并发: {active_workers}/{max_workers} | ⚡ 基于 asyncio 高并发引擎")
-        
-        with col_pause:
-            if is_paused:
-                if st.button("▶️ 恢复下载", use_container_width=True, type="primary"):
-                    LAKE.resume_download()
-                    st.rerun()
-            else:
-                if st.button("⏸️ 暂停下载", use_container_width=True):
-                    LAKE.pause_download()
-                    st.rerun()
-        
         with col_stop:
             if st.button("⏹️ 终止全部", use_container_width=True, type="secondary", help="清空所有任务列表"):
                 LAKE.stop_download()
                 st.rerun()
+        
+        # 增加并发信息与控制按钮
+        col_prog, col_ctl = st.columns([3, 2])
+        with col_prog:
+            st.progress(percent / 100, text=status_text)
+            st.caption(f"{status_emoji} | 并发: {active_workers}/{max_workers} | ⚡ 基于 asyncio 高并发引擎")
+        
+        with col_ctl:
+            is_finished = (completed + failed == total) and total > 0
+            
+            if is_finished and failed > 0:
+                 if st.button("🚑 修复数据 (重试失败项)", use_container_width=True, type="primary"):
+                     LAKE.retry_failed_tasks()
+                     # 触发反向更新 (强制刷新缓存)
+                     LAKE.force_refresh_status()
+                     st.rerun()
+            elif is_finished:
+                 st.success("✅ 全部任务已完成")
+            elif is_paused:
+                if st.button("▶️ 恢复下载", use_container_width=True, type="primary"):
+                    LAKE.resume_download()
+                    st.rerun()
+            else:
+                c_p, c_s = st.columns(2)
+                with c_p:
+                    if st.button("⏸️ 暂停", use_container_width=True):
+                        LAKE.pause_download()
+                        st.rerun()
+                with c_s:
+                    if st.button("⏹️ 终止", use_container_width=True):
+                        LAKE.stop_download()
+                        st.rerun()
         
         # 分项下载卡片
         details = dl_status.get("details", {})

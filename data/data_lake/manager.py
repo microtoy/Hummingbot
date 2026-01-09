@@ -81,6 +81,45 @@ class LakeManager:
             
         threading.Thread(target=_bg_run, daemon=True).start()
 
+    def retry_failed_tasks(self):
+        """重试所有失败的任务"""
+        failed_tasks = [t for t in self.scheduler.tasks if t.status == "failed"]
+        if not failed_tasks:
+            logger.info("No failed tasks to retry.")
+            return
+            
+        logger.info(f"Retrying {len(failed_tasks)} failed tasks...")
+        for t in failed_tasks:
+            t.status = "pending"
+            t.error = None
+            t.rows_downloaded = 0
+            
+        # 确保调度器可以运行 (如果是停止状态)
+        self.scheduler._stop_signal = False
+        self.scheduler._pause_event.set()
+        
+        # 启动后台线程 (如果已有线程在跑 _run_scheduler 会自动捡起 pending 任务吗？
+        # 取决于 scheduler.run 实现。scheduler.run 是一次性的 gather(pending)，跑完就退出了。
+        # 所以必须重新触发 run。
+        if not self.scheduler._running:
+             self._trigger_background_run()
+        else:
+            # 如果正在运行但在暂停/空闲，可能需要逻辑去 notify
+            # 简化起见，假设 running 状态下它只跑初始那批。
+            # scheduler.run 逻辑是: pending_tasks = [t for t in tasks if pending]; await gather()
+            # 所以正在运行的 scheduler 不会动态感知状态变回 pending 的任务。
+            # Hack: 如果正在运行，可能需要重新启动一次运行循环，或者 scheduler 应该设计为 while loop。
+            # 目前 scheduler.run 是简单的一波流。
+            # 所以如果是 Running 状态（比如还有其他任务在跑），我们很难插入。
+            # 但用户场景通常是“全部跑完了(failed/completed)”，此时 running=False。
+            # 直接调用 _trigger_background_run 即可。
+             pass
+
+    def force_refresh_status(self):
+        """强制刷新状态缓存"""
+        self._last_summary = None
+        self._last_summary_time = 0
+
     def _trigger_background_run(self):
         """启动后台运行"""
         threading.Thread(target=self._run_async_tasks, daemon=True).start()
