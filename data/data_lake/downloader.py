@@ -60,7 +60,7 @@ class DailyDownloader:
             
             if df is not None and not df.empty:
                 # 过滤可能超出的数据 (Binance API 可能会返回范围外的数据)
-                df = df[(df['timestamp'] >= start_ts * 1000) & (df['timestamp'] < end_ts * 1000)]
+                df = df[(df['timestamp'] >= start_ts) & (df['timestamp'] < end_ts)]
                 
                 # 保存到 Lake
                 self.storage.save_day_data(df, task.exchange, task.trading_pair, task.interval, task.day)
@@ -82,7 +82,7 @@ class LakeTaskScheduler:
     """
     任务调度器：负责根据用户的选择生成任务列表，并管理并发。
     """
-    def __init__(self, storage: LakeStorage, max_workers: int = 5):
+    def __init__(self, storage: LakeStorage, max_workers: int = 15):
         self.storage = storage
         self.downloader = DailyDownloader(storage)
         self.max_workers = max_workers

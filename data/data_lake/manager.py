@@ -29,7 +29,7 @@ class LakeManager:
             return
             
         self.storage = LakeStorage()
-        self.scheduler = LakeTaskScheduler(self.storage, max_workers=5)
+        self.scheduler = LakeTaskScheduler(self.storage, max_workers=15)
         self._last_summary = None
         self._last_summary_time = 0
         self._initialized = True
