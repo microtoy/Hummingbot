@@ -78,7 +78,11 @@ class LakeLoader:
         # 3. 并行读取
         def read_one(path):
             try:
-                return pd.read_csv(path)
+                df = pd.read_csv(path)
+                # 🔥 FIX: Normalize timestamp immediately (early data uses milliseconds)
+                if 'timestamp' in df.columns and df['timestamp'].max() > 1e11:
+                    df['timestamp'] = df['timestamp'] / 1000.0
+                return df
             except Exception as e:
                 print(f"⚠️ [LOADER ERROR] Failed to read {path}: {e}")
                 return None

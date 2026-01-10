@@ -26,6 +26,11 @@ class DataMerger:
         while current <= end_date:
             df = self.storage.load_day_data(exchange, trading_pair, interval, current)
             if df is not None:
+                # 🔥 FIX: Normalize timestamp IMMEDIATELY after loading each shard
+                if 'timestamp' in df.columns:
+                    # Early data (2017-2019) uses milliseconds, later data uses seconds
+                    if df['timestamp'].max() > 1e11:  # Milliseconds detected
+                        df['timestamp'] = df['timestamp'] / 1000.0
                 all_dfs.append(df)
             current += timedelta(days=1)
             
@@ -36,9 +41,10 @@ class DataMerger:
         # 1. 合并
         merged_df = pd.concat(all_dfs, ignore_index=True)
         
-        # 2. 归一化校验 (处理可能存在的旧格式分片)
+        # 2. 归一化校验 (已在上面处理，这里仅做最终验证)
         if 'timestamp' in merged_df.columns:
-            if merged_df['timestamp'].max() > 1e11: # 毫秒检测
+            # Double-check: should all be in seconds now
+            if merged_df['timestamp'].max() > 1e11:
                 merged_df['timestamp'] = merged_df['timestamp'] / 1000.0
             
             # 兼容性映射：处理旧格式分片中的长列名

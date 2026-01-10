@@ -364,6 +364,7 @@ with tab3:
                     
                     engine = BacktestingEngineBase()
                     engine.allow_download = False
+                    engine.force_download = True  # 🔥 FIX: Force reload from Lake, bypass existing cache
                     
                     # Get coverage range
                     key = f"binance:{t_pair_turbo}:{t_int_turbo}"
