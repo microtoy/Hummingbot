@@ -43,8 +43,24 @@ def _mirror_candles_to_tmpfs():
     import pandas as pd
     
     csv_files = list(source.glob("*.csv"))
-    print(f"⚡ [MEGA-TURBO] Mirroring {len(csv_files)} files to Numpy Binary Format...")
+    npy_files = list(source.glob("*.npy"))
     
+    print(f"⚡ [MEGA-TURBO] Mirroring {len(npy_files)} NPY files and {len(csv_files)} CSV files...")
+
+    # 1. Fast Path: Copy existing NPY/JSON files directy
+    import shutil
+    for f in npy_files:
+        dest_npy = dest / f.name
+        dest_json = dest / f.with_suffix(".json").name
+        src_json = f.with_suffix(".json")
+
+        if not dest_npy.exists() or f.stat().st_mtime > dest_npy.stat().st_mtime:
+            shutil.copy2(f, dest_npy)
+            if src_json.exists():
+                shutil.copy2(src_json, dest_json)
+            print(f"  ⚡ [COPY] {f.name} -> tmpfs")
+
+    # 2. Legacy Path: Convert CSV if no NPY exists
     for f in csv_files:
         npy_file = dest / f.name.replace(".csv", ".npy")
         meta_file = dest / f.name.replace(".csv", ".json")

@@ -33,7 +33,7 @@ BATCH_SIZE=50
 TOTAL_SECONDS=$(echo "$HOURS * 3600" | bc)
 
 if [ "$MODE" == "awfo" ]; then
-    SEC_PER_CAND=0.51
+    SEC_PER_CAND=1
 else
     SEC_PER_CAND=0.26
 fi

@@ -222,6 +222,7 @@ class BacktestingEngineBase:
         
         filename = f"{config.connector}_{config.trading_pair}_{config.interval}.csv"
         cache_file = cache_dir / filename
+        actual_read_path = cache_file # Default to local cache
         
         # Determine strict needed range
         candles_buffer = config.max_records * CandlesBase.interval_to_seconds[config.interval]
@@ -256,6 +257,7 @@ class BacktestingEngineBase:
                 mounted_file = Path(MOUNTED_DATA_PATH) / "candles" / filename
                 if mounted_file.exists():
                     search_file = mounted_file
+                    actual_read_path = mounted_file # 🛡️ FIX: Track that we found it on mount
                 else:
                     search_file = None
 
@@ -284,12 +286,23 @@ class BacktestingEngineBase:
                     print(f"⚠️ [DISK ERROR] {e}")
 
         if min_ts is not None and max_ts is not None and not getattr(self, "force_download", False):
+            # 🛡️ FIX: Ensure the file actually exists before we claim a hit
+            # ⚡ OPTIMIZATION: Check for NPY first, then CSV
+            npy_path = cache_file.with_suffix(".npy")
             if min_ts <= needed_start and max_ts >= effective_needed_end - 86400:
-                print(f"✅ [CACHE HIT] {filename} covers requirements. Slicing...")
-                result_df = self._load_candle_slice(cache_file, needed_start, needed_end)
-                key = self.backtesting_data_provider._generate_candle_feed_key(config)
-                self.backtesting_data_provider.candles_feeds[key] = result_df
-                return result_df
+                if npy_path.exists():
+                     print(f"✅ [CACHE HIT] {npy_path.name} (NPY) covers requirements. Slicing...")
+                     result_df = self._load_candle_slice(npy_path, needed_start, needed_end)
+                     key = self.backtesting_data_provider._generate_candle_feed_key(config)
+                     self.backtesting_data_provider.candles_feeds[key] = result_df
+                     return result_df
+                elif actual_read_path.exists():
+                    print(f"✅ [CACHE HIT] {filename} (CSV) covers requirements. Slicing...")
+                    # 🛡️ FIX: Use the path where data was actually found (could be mount)
+                    result_df = self._load_candle_slice(actual_read_path, needed_start, needed_end)
+                    key = self.backtesting_data_provider._generate_candle_feed_key(config)
+                    self.backtesting_data_provider.candles_feeds[key] = result_df
+                    return result_df
 
         # --- NEW: V2 LAKE DIRECT LOAD ---
         # If cache is missing or insufficient, try pulling directly from our partitioned Lake V2
@@ -318,7 +331,8 @@ class BacktestingEngineBase:
                         print(f"⚠️ [V2 MERGE ERROR] {me}")
                 
                 # Update persistent storage
-                lake_df.to_csv(cache_file, index=False)
+                # ⚡ OPTIMIZATION: SKIP CSV saving to reduce I/O overhead
+                # lake_df.to_csv(cache_file, index=False)  <-- REMOVED
                 self._save_binary_cache(cache_file, lake_df)
                 
                 # Return slice
