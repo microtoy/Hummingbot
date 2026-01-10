@@ -33,7 +33,7 @@ case $option in
         DAYS=${DAYS:-360}
         read -p "Enter iterations per coin (default 20): " ITER
         ITER=${ITER:-20}
-        TOKENS="ALL"
+        TOKENS="XRP-USDT"
         ;;
     2)
         MODE="refine"

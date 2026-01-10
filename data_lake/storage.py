@@ -10,12 +10,27 @@ class LakeStorage:
     负责将行情数据按天存储在独立的文件中，防止并发冲突。
     目录结构: base_path/{exchange}/{trading_pair}/{interval}/{year}/{month}/{date}.csv
     """
-    def __init__(self, base_path: str = "data/lake"):
-        # ⚡ 自动探测路径：优先使用挂载的持久化卷
-        import hummingbot
-        default_base = Path(hummingbot.data_path()) / "lake"
-        self.base_path = default_base
+    def __init__(self, base_path: Union[str, Path, None] = None):
+        if base_path:
+            self.base_path = Path(base_path)
+        else:
+            # ⚡ 自动探测路径：优先级 Env > Rel Path > Package Path
+            env_path = os.getenv("DATA_LAKE_PATH")
+            if env_path:
+                self.base_path = Path(env_path)
+            else:
+                rel_path = Path("data/lake")
+                if rel_path.exists():
+                    self.base_path = rel_path
+                else:
+                    # 探测包路径 (针对 Docker 挂载 site-packages 情况)
+                    pkg_path = Path(__file__).parent.parent / "data" / "lake"
+                    self.base_path = pkg_path
+        
         self.base_path.mkdir(parents=True, exist_ok=True)
+        # 打印探测结果以便调试
+        import logging
+        logging.info(f"🛡️ LakeStorage initialized at: {self.base_path.absolute()}")
 
     def get_partition_path(self, exchange: str, trading_pair: str, interval: str, day: Union[date, str]) -> Path:
         """获取特定日期的分片文件路径"""

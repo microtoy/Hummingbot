@@ -4,10 +4,10 @@ from datetime import datetime, date, timedelta
 import sys
 import os
 
-# 确保可以导入 data_lake
+# 确保可以导入 data_lake (迁移至项目根目录，与 data 同级)
 sys.path.append(os.getcwd())
 
-from data.data_lake.manager import get_lake_manager
+from data_lake.manager import get_lake_manager
 
 st.set_page_config(layout="wide", page_title="Data Lake V2")
 

@@ -18,7 +18,7 @@ from hummingbot.core.data_type.common import LazyDict, TradeType
 # ⚡ MEGA-TURBO: Persistent mounted data path for fallback
 MOUNTED_DATA_PATH = "/opt/conda/envs/hummingbot-api/lib/python3.12/site-packages/data"
 from hummingbot.data_feed.candles_feed.data_types import CandlesConfig
-from data.data_lake.loader import LakeLoader
+from data_lake.loader import LakeLoader
 from hummingbot.exceptions import InvalidController
 from hummingbot.strategy_v2.backtesting.backtesting_data_provider import BacktestingDataProvider
 from hummingbot.strategy_v2.backtesting.executor_simulator_base import ExecutorSimulation

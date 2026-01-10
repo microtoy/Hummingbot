@@ -14,21 +14,25 @@ class LakeLoader:
         if base_path:
             self.base_path = Path(base_path)
         else:
-            # ⚡ Turbo 模式补丁: Turbo Worker 会将 data_path 设为 /tmp/hbot_data
-            # 但 Lake 数据通常很大，不会被镜像到 tmp，所以我们需要检测并回退。
-            hbot_path = Path(hummingbot.data_path())
-            lake_path = hbot_path / "lake"
+            # ⚡ 同步 LakeStorage 的探测逻辑
+            env_path = os.getenv("DATA_LAKE_PATH")
+            if env_path:
+                self.base_path = Path(env_path)
+            else:
+                rel_path = Path("data/lake")
+                if rel_path.exists():
+                    self.base_path = rel_path
+                else:
+                    # 探测包路径 (针对 Docker 容器环境)
+                    pkg_path = Path(__file__).parent.parent / "data" / "lake"
+                    self.base_path = pkg_path
             
-            if not lake_path.exists():
-                # 尝试从库安装路径寻找原始数据
-                try:
-                    original_base = Path(hummingbot.prefix_path()) / "data" / "lake"
-                    if original_base.exists():
-                        lake_path = original_base
-                except:
-                    pass
-            
-            self.base_path = lake_path
+            # 特殊处理：如果是 Hummingbot data_path 环境 (Turbo Worker)
+            if not self.base_path.exists():
+                hbot_path = Path(hummingbot.data_path())
+                lake_path = hbot_path / "lake"
+                if lake_path.exists():
+                    self.base_path = lake_path
 
     def _get_path(self, exchange: str, pair: str, interval: str, day: date) -> Path:
         """根据存储规则构建路径"""

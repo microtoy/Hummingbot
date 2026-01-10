@@ -17,6 +17,7 @@ services:
       - ./custom_configs:/home/dashboard/custom_configs
       - ./ProxyManager:/opt/conda/envs/dashboard/lib/python3.12/site-packages/ProxyManager
       - ./data:/opt/conda/envs/dashboard/lib/python3.12/site-packages/data
+      - ./data_lake:/opt/conda/envs/dashboard/lib/python3.12/site-packages/data_lake
       - ./data/candles:/tmp/hbot_data/candles
       - ./config:/opt/conda/envs/dashboard/lib/python3.12/site-packages/config
       - ./.agent/system/patches/api_client.py:/opt/conda/envs/dashboard/lib/python3.12/site-packages/hummingbot_api_client/client.py
@@ -32,6 +33,7 @@ services:
     volumes:
       - ./bots:/hummingbot-api/bots
       - ./data:/opt/conda/envs/hummingbot-api/lib/python3.12/site-packages/data
+      - ./data_lake:/opt/conda/envs/hummingbot-api/lib/python3.12/site-packages/data_lake
       - ./config:/opt/conda/envs/hummingbot-api/lib/python3.12/site-packages/config
       - ./custom_strategies:/hummingbot-api/bots/controllers/custom
       - ./.agent/system/patches/backtesting_engine_base.py:/opt/conda/envs/hummingbot-api/lib/python3.12/site-packages/hummingbot/strategy_v2/backtesting/backtesting_engine_base.py
