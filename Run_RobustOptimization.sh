@@ -15,7 +15,7 @@
 HOURS=${1:-3}
 TOKENS=${2:-"ALL"}
 MODE=${3:-"awfo"}
-STRATEGY=${4:-"rsi_reversion"}
+STRATEGY=${4:-"ma_cross"}
 
 # Expansion and counting (Handles both Comma and Space)
 if [ "$TOKENS" == "ALL" ]; then
