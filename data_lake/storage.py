@@ -14,23 +14,20 @@ class LakeStorage:
         if base_path:
             self.base_path = Path(base_path)
         else:
-            # ⚡ 自动探测路径：优先级 Env > Rel Path > Package Path
+            # ⚡ 优先使用显式环境变量
             env_path = os.getenv("DATA_LAKE_PATH")
             if env_path:
                 self.base_path = Path(env_path)
             else:
-                rel_path = Path("data/lake")
-                if rel_path.exists():
-                    self.base_path = rel_path
-                else:
-                    # 探测包路径 (针对 Docker 挂载 site-packages 情况)
-                    pkg_path = Path(__file__).parent.parent / "data" / "lake"
-                    self.base_path = pkg_path
+                # 默认指向容器内持久化卷位置 (dashboard 容器挂载了 ./data -> /home/dashboard/data)
+                # 之前有些脚本可能写入的是 ./data/lake 或 ./data_lake/STORAGE，这里统配
+                p1 = Path("/home/dashboard/data/lake")
+                p2 = Path("/opt/conda/envs/dashboard/lib/python3.12/site-packages/data/lake")
+                self.base_path = p1 if p1.exists() else p2 if p2.exists() else p1
         
         self.base_path.mkdir(parents=True, exist_ok=True)
-        # 打印探测结果以便调试
         import logging
-        logging.info(f"🛡️ LakeStorage initialized at: {self.base_path.absolute()}")
+        logging.info(f"🛡️ LakeStorage persistent path: {self.base_path.absolute()}")
 
     def get_partition_path(self, exchange: str, trading_pair: str, interval: str, day: Union[date, str]) -> Path:
         """获取特定日期的分片文件路径"""
@@ -139,8 +136,27 @@ class LakeStorage:
         if not self.base_path.exists():
             return stats
             
-        # 优化遍历逻辑
-        for file in self.base_path.rglob("*.csv"):
+        # ⚡ 采用层级递归替代 rglob 以提升海量小文件遍历速度与稳定性
+        depth_files = []
+        try:
+            for exch_dir in self.base_path.iterdir():
+                if not exch_dir.is_dir(): continue
+                for pair_dir in exch_dir.iterdir():
+                    if not pair_dir.is_dir(): continue
+                    for int_dir in pair_dir.iterdir():
+                        if not int_dir.is_dir(): continue
+                        # 遍历年/月
+                        for year_dir in int_dir.iterdir():
+                            if not year_dir.is_dir(): continue
+                            for month_dir in year_dir.iterdir():
+                                if not month_dir.is_dir(): continue
+                                for f in month_dir.iterdir():
+                                    if f.suffix == ".csv":
+                                        depth_files.append(f)
+        except Exception as e:
+            logging.error(f"Traversal failed: {e}")
+
+        for file in depth_files:
             stats["total_files"] += 1
             try:
                 f_stat = file.stat()

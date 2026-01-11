@@ -3,6 +3,7 @@ import threading
 import asyncio
 import logging
 from typing import Optional, List, Dict
+import datetime
 from datetime import date
 from .storage import LakeStorage
 from .downloader import LakeTaskScheduler
@@ -30,9 +31,16 @@ class LakeManager:
             
         self.storage = LakeStorage()
         self.scheduler = LakeTaskScheduler(self.storage, max_workers=15)
-        self._last_summary = None
-        self._last_summary_time = 0
+        # 初始化默认缓存，防止加载期间出现 None 引用
+        self._status_cache = {
+            "storage": {"total_files": 0, "total_size_mb": 0.0, "pairs": {}},
+            "updated_at": "Initializing..."
+        }
+        self._is_auditing = False
         self._initialized = True
+        
+        # ⚡ 启动时自动执行背景审计 (快速模式，不阻塞 UI)
+        self.refresh_status(audit=False)
 
     async def get_top_pairs(self, limit: int = 100, rank_type: str = "market_cap") -> List[str]:
         """获取市场排名交易对，支持市值 (market_cap) 和成交额 (volume)"""
@@ -81,6 +89,81 @@ class LakeManager:
             
         threading.Thread(target=_bg_run, daemon=True).start()
 
+    def repair_all_assets(self):
+        """
+        🚨 一键修复所有存量资产
+        遍历所有现有记录，找出缺失天数和行数不足的异常天数，并触发下载。
+        """
+        def _bg_repair():
+            # 1. 触发一次同步/深度诊断 (在后台线程内执行以防阻塞)
+            summary = self.storage.get_summary(fast=False, audit=True)
+            pairs_stats = summary.get("pairs", {})
+
+            if not pairs_stats:
+                logger.info("No assets found to repair.")
+                return
+
+            added_count = 0
+            for key, p_stats in pairs_stats.items():
+                # key 格式为 "binance:BTC-USDT:1m"
+                parts = key.split(":")
+                if len(parts) < 3: continue
+                exch, pair, interval = parts[0], parts[1], parts[2]
+                
+                # 找出由于 Gap 导致的完全缺失日期
+                missing_days = self.storage.get_missing_days(exch, pair, interval)
+                
+                # 找出审计发现的行数不足的异常日期
+                incomplete_days = []
+                for day_str in p_stats.get("incomplete_list", []):
+                    try:
+                        day = date.fromisoformat(day_str)
+                        incomplete_days.append(day)
+                    except: continue
+                
+                # 汇总需要修复的任务
+                all_repair_days = sorted(list(set(missing_days + incomplete_days)))
+                
+                if all_repair_days:
+                    from .downloader import LakeDownloadTask
+                    for day in all_repair_days:
+                        is_duplicate = any(t.trading_pair == pair and t.interval == interval and t.day == day for t in self.scheduler.tasks)
+                        if not is_duplicate:
+                            self.scheduler.tasks.append(LakeDownloadTask(trading_pair=pair, interval=interval, day=day))
+                            added_count += 1
+            
+            if added_count > 0:
+                logger.info(f"🚨 Global Repair: Added {added_count} incremental tasks.")
+                self._run_async_tasks()
+            else:
+                logger.info("✅ Global Repair: All assets are healthy. No tasks added.")
+
+        threading.Thread(target=_bg_repair, daemon=True).start()
+
+    def _trigger_background_run(self):
+        """启动后台运行"""
+        if not self.scheduler._running:
+            threading.Thread(target=self._run_async_tasks, daemon=True).start()
+
+    async def _run_scheduler(self):
+        """异步执行调度"""
+        try:
+            await self.scheduler.run()
+        except Exception as e:
+            logger.error(f"Scheduler failed: {e}")
+
+    def _run_async_tasks(self):
+        """后台运行调度任务"""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(self._run_scheduler())
+        finally:
+            loop.close()
+            # ⚡ 下载完成后自动触发增量刷新
+            self.refresh_status(audit=False)
+            logger.info("📊 Download batch completed, incremental status refresh triggered.")
+
     def retry_failed_tasks(self):
         """重试所有失败的任务"""
         failed_tasks = [t for t in self.scheduler.tasks if t.status == "failed"]
@@ -115,47 +198,43 @@ class LakeManager:
             # 直接调用 _trigger_background_run 即可。
              pass
 
-    def force_refresh_status(self):
-        """强制刷新状态缓存"""
-        self._last_summary = None
-        self._last_summary_time = 0
+    def refresh_status(self, audit: bool = False):
+        """
+        触发状态更新。如果是 audit=True，会在后台执行深度扫描。
+        """
+        if self._is_auditing:
+            return
 
-    def _trigger_background_run(self):
-        """启动后台运行"""
-        threading.Thread(target=self._run_async_tasks, daemon=True).start()
+        def _bg_scan():
+            self._is_auditing = True
+            try:
+                # 执行扫描
+                summary = self.storage.get_summary(fast=not audit, audit=audit)
+                # 更新缓存
+                self._status_cache = {
+                    "storage": summary,
+                    "updated_at": datetime.datetime.now().strftime("%H:%M:%S")
+                }
+                logger.info(f"📊 Lake status updated (audit={audit})")
+            except Exception as e:
+                logger.error(f"❌ Status scan failed: {e}")
+            finally:
+                self._is_auditing = False
 
-    async def _run_scheduler(self):
-        """异步执行调度"""
-        try:
-            await self.scheduler.run()
-        except Exception as e:
-            logger.error(f"Scheduler failed: {e}")
-
-    def _run_async_tasks(self):
-        """后台运行调度任务"""
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            # 使用 create_task 包装
-            loop.run_until_complete(self._run_scheduler())
-        finally:
-            loop.close()
-            # ⚡ 下载完成后自动清除缓存，确保数据资产概览显示最新状态
-            self.force_refresh_status()
-            logger.info("📊 Download batch completed, status cache refreshed.")
+        threading.Thread(target=_bg_scan, daemon=True).start()
 
     def get_status(self, audit: bool = False) -> Dict:
-        """获取系统全面状态 (带缓存避免阻塞 UI)"""
-        import time
-        # 强制审计或过期
-        if audit or self._last_summary is None or (time.time() - self._last_summary_time > 10):
-            self._last_summary = self.storage.get_summary(fast=not audit, audit=audit)
-            self._last_summary_time = time.time()
-            
+        """获取系统状态 (优先使用缓存)"""
+        # 如果调用者明确要求 audit 且当前未在审计中，则触发一次背景审计
+        if audit and not self._is_auditing:
+            self.refresh_status(audit=True)
+
         return {
-            "storage": self._last_summary,
+            "storage": self._status_cache["storage"] if self._status_cache else {"total_files": 0, "total_size_mb": 0.0, "pairs": {}},
             "download": self.scheduler.get_progress(),
-            "slots": self.scheduler._slots
+            "slots": self.scheduler._slots,
+            "is_auditing": self._is_auditing,
+            "last_updated": self._status_cache["updated_at"] if self._status_cache else "Scanning..."
         }
 
 def get_lake_manager() -> LakeManager:

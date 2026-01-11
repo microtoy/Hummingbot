@@ -104,16 +104,23 @@ class LakeTaskScheduler:
 
     def pause_tasks(self):
         """暂停下载 (线程安全)"""
-        if self._loop:
-            self._loop.call_soon_threadsafe(self._pause_event.clear)
+        if self._loop and not self._loop.is_closed():
+            try:
+                self._loop.call_soon_threadsafe(self._pause_event.clear)
+            except RuntimeError:
+                # 即使 is_closed() 为 False，call_soon_threadsafe 仍可能因极短时间内循环关闭报错
+                self._pause_event.clear()
         else:
             self._pause_event.clear()
         logger.info("⏸️ Download paused.")
 
     def resume_tasks(self):
         """恢复下载 (线程安全)"""
-        if self._loop:
-            self._loop.call_soon_threadsafe(self._pause_event.set)
+        if self._loop and not self._loop.is_closed():
+            try:
+                self._loop.call_soon_threadsafe(self._pause_event.set)
+            except RuntimeError:
+                self._pause_event.set()
         else:
             self._pause_event.set()
         logger.info("▶️ Download resumed.")
@@ -194,9 +201,12 @@ class LakeTaskScheduler:
                     finally:
                         self._slots[slot_idx] = None
 
-        if pending_tasks:
-            await asyncio.gather(*(worker(t) for t in pending_tasks))
-        self._running = False
+        try:
+            if pending_tasks:
+                await asyncio.gather(*(worker(t) for t in pending_tasks))
+        finally:
+            self._running = False
+            self._loop = None # 清理 loop 引用，防止过时引用导致异常
 
     def get_progress(self) -> Dict:
         """获取综合进度"""

@@ -231,19 +231,79 @@ with tab1:
 
 # TAB 2: 数据资产
 with tab2:
+    # 🆕 资产清单表格 (在此 Tab 顶部)
+    status = LAKE.get_status()
+    storage_stats = status.get("storage", {})
+    pairs_stats = storage_stats.get("pairs", {})
+    
+    col_inv1, col_inv2 = st.columns([4, 1])
+    with col_inv1:
+        st.subheader("📋 数据资产清单 (按币种聚合)")
+        st.caption(f"上次同步: {status.get('last_updated', '未知')} | {'🔄 正在扫描中...' if status.get('is_auditing') else '✅ 缓存已同步'}")
+    with col_inv2:
+        if st.button("🔄 同步并审计", type="primary", use_container_width=True, help="点击后后台开始深度扫描，由于文件较多可能需要几十秒"):
+            LAKE.refresh_status(audit=True)
+            st.rerun()
+
+    if pairs_stats:
+        # 聚合逻辑：将 "binance:BTC-USDT:1m" 等聚合为币种
+        inventory_data = []
+        grouped = {}
+        for key, p_stats in pairs_stats.items():
+            parts = key.split(":")
+            if len(parts) < 3: continue
+            pair = parts[1]
+            if pair not in grouped:
+                grouped[pair] = {
+                    "intervals": [], "start": None, "end": None, 
+                    "files": 0, "gaps": 0, "incomplete": 0
+                }
+            g = grouped[pair]
+            g["intervals"].append(parts[2])
+            g["files"] += p_stats.get("count", 0)
+            g["gaps"] += p_stats.get("missing_days", 0)
+            g["incomplete"] += p_stats.get("incomplete_days", 0)
+            p_start, p_end = p_stats.get("start"), p_stats.get("end")
+            if p_start:
+                if g["start"] is None or p_start < g["start"]: g["start"] = p_start
+            if p_end:
+                if g["end"] is None or p_end > g["end"]: g["end"] = p_end
+
+        for pair, g in grouped.items():
+            inventory_data.append({
+                "交易对": pair,
+                "周期": ", ".join(sorted(set(g["intervals"]))),
+                "起始范围": f"{g['start']} → {g['end']}" if g['start'] else "-",
+                "分片文件": g["files"],
+                "缺失天 (Gap)": g["gaps"],
+                "异常天 (Incomplete)": g["incomplete"]
+            })
+        
+        df_inventory = pd.DataFrame(inventory_data)
+        st.dataframe(df_inventory, use_container_width=True, hide_index=True)
+        
+        # 全局修复按钮
+        col_rep1, col_rep2 = st.columns([2, 3])
+        with col_rep1:
+            if st.button("🚨 一键修复所有存量资产", use_container_width=True, type="primary"):
+                LAKE.repair_all_assets()
+                st.info("已提交全局修复任务，请在“灵活下载”页查看。")
+        with col_rep2:
+            st.caption("提示: 自动补齐清单中的所有 Gap 天及行数不足的 Incomplete 天。")
+    elif status.get("is_auditing"):
+        st.warning("🔄 正在扫描磁盘资产（首次启动审计中），扫描完成后将自动显示数据...")
+        st.info("数据量较大时扫描需要 10-60 秒，您可以先去“灵活下载”页配置计划。")
+    else:
+        st.info("📭 数据湖目前为空。请在“灵活下载”页中启动下载，或点击右上角“同步并审计”手动触发扫描。")
+    
+    st.markdown("---")
+
     @st.fragment(run_every="5s")
     def render_data_assets():
         """数据资产概览 - 自动刷新"""
-        c1, c2 = st.columns([5, 1])
-        with c1:
-            st.subheader("数据湖存储详情")
-        with c2:
-            if st.button("🔍 深度质检", help="物理扫描每个文件，核对行数 (1m=1440, 1h=24)", key="deep_audit"):
-                LAKE.get_status(audit=True)
-                st.rerun()
-        
-        # 每次刷新都获取最新状态
-        fresh_status = LAKE.get_status()
+        # 实时从缓存拿
+        curr_status = LAKE.get_status()
+        st.subheader("数据湖存储详情 (分项视图)")
         
         def render_coverage_ribbon(bits):
             if not bits: return ""
@@ -267,7 +327,7 @@ with tab2:
             """
             return html
 
-        pairs_data = fresh_status["storage"]["pairs"]
+        pairs_data = curr_status["storage"]["pairs"]
         if pairs_data:
             for k, v in pairs_data.items():
                 with st.container():
@@ -303,13 +363,13 @@ with tab2:
                     with m_col3:
                         incomplete_count = v.get('incomplete_days', 0)
                         if incomplete_count > 0:
-                            with st.expander(f"⚠️ {incomplete_count} 天异常", help="行数不足的天数"):
+                            with st.expander(f"⚠️ {incomplete_count} 天异常"):
                                 st.write(v.get('incomplete_list', [])[:50])
                         else:
                             st.write("💎 内容完整")
                     
                     with m_col4:
-                        if st.button("🛠️ 深度修补", key=f"repair_{k}", help="补齐缺失并重刷异常天"):
+                        if st.button("🛠️ 深度修补", key=f"repair_{k}"):
                             parts = k.split(":")
                             for d_str in v.get('incomplete_list', []):
                                 try:
